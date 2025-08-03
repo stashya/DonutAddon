@@ -94,19 +94,18 @@ public class AutoRTP extends Module {
         canRtp = true;
         teleportCount = 0;
 
-        if (mc.player != null) {
-            lastPos = mc.player.getBlockPos();
+        if (mc.player == null) return;
+        lastPos = mc.player.getBlockPos();
 
-            // Check if we can RTP based on time
-            long timeSinceLastRtp = System.currentTimeMillis() - lastRtpTime;
-            if (lastRtpTime > 0 && timeSinceLastRtp < (RTP_COOLDOWN * 1000L)) {
-                int remainingSeconds = (int)((RTP_COOLDOWN * 1000L - timeSinceLastRtp) / 1000L);
-                state = State.COOLDOWN;
-                tickTimer = (RTP_COOLDOWN - remainingSeconds) * 20;
-            } else {
-                // Send first RTP immediately if cooldown is clear
-                sendRTP();
-            }
+        // Check if we can RTP based on time
+        long timeSinceLastRtp = System.currentTimeMillis() - lastRtpTime;
+        if (lastRtpTime > 0 && timeSinceLastRtp < (RTP_COOLDOWN * 1000L)) {
+            int remainingSeconds = (int) ((RTP_COOLDOWN * 1000L - timeSinceLastRtp) / 1000L);
+            state = State.COOLDOWN;
+            tickTimer = (RTP_COOLDOWN - remainingSeconds) * 20;
+        } else {
+            // Send first RTP immediately if cooldown is clear
+            sendRTP();
         }
     }
 
@@ -267,10 +266,7 @@ public class AutoRTP extends Module {
 
     private void sendRTP() {
         if (mc.player == null) return;
-
-        if (!canRtp) {
-            return;
-        }
+        if (!canRtp) return;
 
         // Check if enough time has passed since last RTP
         long timeSinceLastRtp = System.currentTimeMillis() - lastRtpTime;
