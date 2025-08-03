@@ -1,0 +1,12 @@
+{
+  "required": true,
+  "package": "com.DonutAddon.addon.mixin",
+  "compatibilityLevel": "JAVA_21",
+  "client": [
+    "DonutMixin",
+    "HudMixin"
+  ],
+  "injectors": {
+    "defaultRequire": 1
+  }
+}
