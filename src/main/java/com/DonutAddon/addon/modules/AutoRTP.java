@@ -21,10 +21,10 @@ public class AutoRTP extends Module {
     private final SettingGroup sgGeneral = settings.getDefaultGroup();
 
     private final Setting<Region> region = sgGeneral.add(new EnumSetting.Builder<Region>()
-        .name("region")
-        .description("The region to RTP to.")
-        .defaultValue(Region.EU_CENTRAL)
-        .build()
+            .name("region")
+            .description("The region to RTP to.")
+            .defaultValue(Region.EU_CENTRAL)
+            .build()
     );
 
     public enum Region {
@@ -146,65 +146,64 @@ public class AutoRTP extends Module {
                 }
 
                 mc.execute(() -> {
-                    if (mc.player != null) {
-                        BlockPos newPos = mc.player.getBlockPos();
+                    if (mc.player == null) return;
+                    BlockPos newPos = mc.player.getBlockPos();
 
-                        // If we're in cooldown but receive a teleport, it's likely from a previous RTP
-                        if (state == State.COOLDOWN || state == State.IDLE) {
-                            teleportPos = newPos;
-                            lastRtpTime = System.currentTimeMillis();
+                    // If we're in cooldown but receive a teleport, it's likely from a previous RTP
+                    if (state == State.COOLDOWN || state == State.IDLE) {
+                        teleportPos = newPos;
+                        lastRtpTime = System.currentTimeMillis();
 
-                            // Check if this completed teleport has good coordinates
-                            if (!isNearSpawn(newPos) && checkCoordinates(newPos)) {
-                                mc.getToastManager().add(new MeteorToast(
+                        // Check if this completed teleport has good coordinates
+                        if (!isNearSpawn(newPos) && checkCoordinates(newPos)) {
+                            mc.getToastManager().add(new MeteorToast(
                                     Items.DRAGON_EGG,
                                     "Found Good Coordinates",
                                     "Good Luck!"
-                                ));
-                                toggle();
-                                return;
-                            }
-
-                            // Reset cooldown timer since we just teleported
-                            state = State.COOLDOWN;
-                            tickTimer = 0;
-                            canRtp = false;
+                            ));
+                            toggle();
                             return;
                         }
 
-                        if (state == State.WAITING_FOR_SPAWN_TP || state == State.WAITING_FOR_FINAL_TP || state == State.COMMAND_SENT) {
-                            teleportCount++;
-                            info("State: %s, Teleport #%d at X=%d, Z=%d", state.toString(), teleportCount, newPos.getX(), newPos.getZ());
+                        // Reset cooldown timer since we just teleported
+                        state = State.COOLDOWN;
+                        tickTimer = 0;
+                        canRtp = false;
+                        return;
+                    }
 
-                            // Check if this is spawn teleport
-                            if (isNearSpawn(newPos)) {
-                                info("Detected spawn teleport");
-                                state = State.WAITING_FOR_FINAL_TP;
-                                tickTimer = 0;
-                                teleportCount = 1; // Reset count as spawn is first teleport
-                            } else {
-                                // This is the final teleport
-                                teleportPos = newPos;
+                    if (state == State.WAITING_FOR_SPAWN_TP || state == State.WAITING_FOR_FINAL_TP || state == State.COMMAND_SENT) {
+                        teleportCount++;
+                        info("State: %s, Teleport #%d at X=%d, Z=%d", state.toString(), teleportCount, newPos.getX(), newPos.getZ());
 
-                                info("RTP completed (attempt #%d)", attempts);
+                        // Check if this is spawn teleport
+                        if (isNearSpawn(newPos)) {
+                            info("Detected spawn teleport");
+                            state = State.WAITING_FOR_FINAL_TP;
+                            tickTimer = 0;
+                            teleportCount = 1; // Reset count as spawn is first teleport
+                        } else {
+                            // This is the final teleport
+                            teleportPos = newPos;
 
-                                state = State.TELEPORT_COMPLETE;
-                                tickTimer = 0;
-                                teleportCount = 0;
+                            info("RTP completed (attempt #%d)", attempts);
 
-                                // Check if coordinates are good
-                                if (checkCoordinates(teleportPos)) {
-                                    mc.getToastManager().add(new MeteorToast(
+                            state = State.TELEPORT_COMPLETE;
+                            tickTimer = 0;
+                            teleportCount = 0;
+
+                            // Check if coordinates are good
+                            if (checkCoordinates(teleportPos)) {
+                                mc.getToastManager().add(new MeteorToast(
                                         Items.DRAGON_EGG,
                                         "Found Good Coordinates",
                                         "Good Luck!"
-                                    ));
-                                    toggle();
-                                } else {
-                                    info("(highlight)Bad coords(default), trying again. (highlight)Stay still(default).");
-                                    state = State.COOLDOWN;
-                                    canRtp = false;
-                                }
+                                ));
+                                toggle();
+                            } else {
+                                info("(highlight)Bad coords(default), trying again. (highlight)Stay still(default).");
+                                state = State.COOLDOWN;
+                                canRtp = false;
                             }
                         }
                     }
@@ -272,7 +271,7 @@ public class AutoRTP extends Module {
         long timeSinceLastRtp = System.currentTimeMillis() - lastRtpTime;
         if (lastRtpTime > 0 && timeSinceLastRtp < (RTP_COOLDOWN * 1000L - 1000L)) {
             state = State.COOLDOWN;
-            tickTimer = (int)(timeSinceLastRtp / 1000) * 20;
+            tickTimer = (int) (timeSinceLastRtp / 1000) * 20;
             return;
         }
 
