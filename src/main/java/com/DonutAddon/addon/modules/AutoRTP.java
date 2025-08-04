@@ -7,6 +7,7 @@ import meteordevelopment.meteorclient.events.world.TickEvent;
 import meteordevelopment.meteorclient.settings.*;
 import meteordevelopment.meteorclient.systems.modules.Categories;
 import meteordevelopment.meteorclient.systems.modules.Module;
+import meteordevelopment.meteorclient.utils.network.MeteorExecutor;
 import meteordevelopment.meteorclient.utils.player.ChatUtils;
 import meteordevelopment.meteorclient.utils.render.MeteorToast;
 import meteordevelopment.orbit.EventHandler;
@@ -64,7 +65,6 @@ public class AutoRTP extends Module {
 
     private State state = State.IDLE;
     private int tickTimer = 0;
-    private BlockPos lastPos = null;
     private BlockPos teleportPos = null;
     private int attempts = 0;
     private boolean canRtp = true;
@@ -88,14 +88,12 @@ public class AutoRTP extends Module {
     public void onActivate() {
         state = State.IDLE;
         tickTimer = 0;
-        lastPos = null;
         teleportPos = null;
         attempts = 0;
         canRtp = true;
         teleportCount = 0;
 
         if (mc.player == null) return;
-        lastPos = mc.player.getBlockPos();
 
         // Check if we can RTP based on time
         long timeSinceLastRtp = System.currentTimeMillis() - lastRtpTime;
@@ -144,8 +142,7 @@ public class AutoRTP extends Module {
                 e.printStackTrace();
             }
 
-            mc.execute(() -> {
-                if (mc.player == null) return;
+            MeteorExecutor.execute(() -> {
                 BlockPos newPos = mc.player.getBlockPos();
 
                 // If we're in cooldown but receive a teleport, it's likely from a previous RTP
@@ -216,11 +213,6 @@ public class AutoRTP extends Module {
 
         tickTimer++;
 
-        // Update last known position
-        if (state == State.IDLE || state == State.COOLDOWN) {
-            lastPos = mc.player.getBlockPos();
-        }
-
         switch (state) {
             case IDLE:
                 // Waiting to start or between attempts
@@ -275,7 +267,6 @@ public class AutoRTP extends Module {
 
         attempts++;
         lastRtpTime = System.currentTimeMillis();
-        lastPos = mc.player.getBlockPos();
         teleportCount = 0;
 
         String command = "/rtp " + region.get().getCommand();
@@ -307,7 +298,8 @@ public class AutoRTP extends Module {
 
     private boolean isNearSpawn(BlockPos pos) {
         int dx = Math.abs(pos.getX() - SPAWN_POS.getX());
+        if (dx > SPAWN_RADIUS) return false;
         int dz = Math.abs(pos.getZ() - SPAWN_POS.getZ());
-        return dx <= SPAWN_RADIUS && dz <= SPAWN_RADIUS;
+        return dz <= SPAWN_RADIUS;
     }
 }
