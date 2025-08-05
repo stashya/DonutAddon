@@ -74,7 +74,7 @@ public class SafetyValidator {
     }
 
     public boolean isInValidMiningArea(PlayerEntity player) {
-        return player.getY() <= -50 && player.isOnGround();
+        return player.getY() <= -30 && player.isOnGround();
     }
 
     public boolean hasValidTool(PlayerEntity player) {
