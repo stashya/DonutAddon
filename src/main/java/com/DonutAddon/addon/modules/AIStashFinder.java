@@ -83,7 +83,7 @@ public class AIStashFinder extends Module {
     private final Setting<Integer> yLevel = sgGeneral.add(new IntSetting.Builder()
         .name("y-level")
         .description("Maximum Y level to operate at.")
-        .defaultValue(-50)
+        .defaultValue(-30)
         .range(-64, -10)
         .sliderRange(-64, -10)
         .visible(() -> false)
@@ -217,7 +217,7 @@ public class AIStashFinder extends Module {
     private final Set<ChunkPos> processedChunks = new HashSet<>();
 
     public AIStashFinder() {
-        super(DonutAddon.CATEGORY, "AI-StashFinder", "(Beta) Automatically mines bases below Y=-50 with safety scanning and base detection.");
+        super(DonutAddon.CATEGORY, "AI-StashFinder", "(Beta) Automatically mines bases below Y=-30 with safety scanning and base detection.");
     }
 
     @Override
