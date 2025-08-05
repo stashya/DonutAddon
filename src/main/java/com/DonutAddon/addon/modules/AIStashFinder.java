@@ -8,7 +8,6 @@ import meteordevelopment.meteorclient.systems.modules.Module;
 import com.DonutAddon.addon.modules.AI.*;
 import meteordevelopment.meteorclient.utils.player.FindItemResult;
 import meteordevelopment.meteorclient.utils.player.InvUtils;
-import meteordevelopment.meteorclient.utils.player.PlayerUtils;
 import meteordevelopment.orbit.EventHandler;
 import net.minecraft.block.entity.*;
 import net.minecraft.item.ItemStack;
@@ -439,7 +438,7 @@ public class AIStashFinder extends Module {
     }
 
     private void handleCentering() {
-        PlayerUtils.centerPlayer();
+        //PlayerUtils.centerPlayer();
 
         float yaw = mc.player.getYaw();
         Direction initialDir = getCardinalDirection(yaw);
@@ -559,7 +558,7 @@ public class AIStashFinder extends Module {
         mc.options.attackKey.setPressed(false);
         mc.options.forwardKey.setPressed(false);
 
-        PlayerUtils.centerPlayer();
+        //PlayerUtils.centerPlayer();
 
         Direction currentDir = directionManager.getCurrentDirection();
         directionManager.recordHazard(currentDir, 0);
