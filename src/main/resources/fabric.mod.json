@@ -1,14 +1,14 @@
 {
   "schemaVersion": 1,
-  "id": "addon-template",
+  "id": "donut-addon",
   "version": "${version}",
-  "name": "Addon Template",
-  "description": "An addon template for Meteor Client addons.",
+  "name": "Donut Addon",
+  "description": "Addon for Donut Smp",
   "authors": [
-    "seasnail"
+    "stashya"
   ],
   "contact": {
-    "sources": "https://github.com/MeteorDevelopment/meteor-addon-template"
+    "sources": "https://github.com/stashya/DonutAddon"
   },
   "icon": "assets/template/icon.png",
   "environment": "client",
