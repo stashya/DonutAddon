@@ -108,7 +108,7 @@ public class AIStashFinder extends Module {
     private final Setting<Integer> scanHeight = sgSafety.add(new IntSetting.Builder()
         .name("scan-height")
         .description("How many blocks above to scan for falling blocks.")
-        .defaultValue(3)
+        .defaultValue(4)
         .range(3, 8)
         .sliderRange(3, 8)
         .visible(() -> false)
@@ -138,9 +138,9 @@ public class AIStashFinder extends Module {
     private final Setting<Integer> safetyMargin = sgSafety.add(new IntSetting.Builder()
         .name("safety-margin")
         .description("Blocks before hazard to stop mining.")
-        .defaultValue(4)
-        .range(1, 4)
-        .sliderRange(1, 4)
+        .defaultValue(6)  // Changed from 4 to 6
+        .range(1, 6)      // Changed max from 4 to 6
+        .sliderRange(1, 6) // Changed max from 4 to 6
         .visible(() -> false)
         .build()
     );
@@ -400,7 +400,7 @@ public class AIStashFinder extends Module {
 
         // Check if we should continue
         if (!safetyValidator.canContinue(mc.player, yLevel.get())) {
-            error("Safety validation failed!");
+            error("Need full health");
             toggle();
             return;
         }
