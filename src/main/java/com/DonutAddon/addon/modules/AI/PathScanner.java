@@ -114,19 +114,27 @@ public class PathScanner {
             // First, check if there's a drop at this position
             BlockPos checkCenter = offsetPosition(start, direction, forward, 0, expectedYLevel - 1);
 
-            // Adjust expected Y level if we detect a drop
-            if (forward > 1 && !world.getBlockState(checkCenter).isAir()) {
-                // Ground is higher than expected, adjust
-                expectedYLevel++;
-            } else if (world.getBlockState(checkCenter).isAir() &&
-                canWalkOn(world, checkCenter.down(), world.getBlockState(checkCenter.down()))) {
-                // This is a drop, adjust expected level
-                expectedYLevel--;
-            }
+            /*
+// Adjust expected Y level if we detect a drop
+if (forward > 1 && !world.getBlockState(checkCenter).isAir()) {
+    expectedYLevel++;
+    System.out.println("DEBUG: Adjusted expectedYLevel UP to " + expectedYLevel + " at forward=" + forward);
+} else if (world.getBlockState(checkCenter).isAir() &&
+    canWalkOn(world, checkCenter.down(), world.getBlockState(checkCenter.down()))) {
+    expectedYLevel--;
+    System.out.println("DEBUG: Adjusted expectedYLevel DOWN to " + expectedYLevel + " at forward=" + forward);
+}
+*/
 
             // Scan for fluids with wider area
             for (int sideways = -scanWidthFluids; sideways <= scanWidthFluids; sideways++) {
                 for (int vertical = -1; vertical <= height; vertical++) {
+                    // For fluids below player level (vertical < 0), only check the direct path
+                    // For fluids at or above player level, check the full width
+                    if (vertical < 0 && sideways != 0) {
+                        continue; // Skip side checks below player level
+                    }
+
                     BlockPos checkPos = offsetPosition(start, direction, forward, sideways, expectedYLevel + vertical);
                     BlockState state = world.getBlockState(checkPos);
 
@@ -145,7 +153,13 @@ public class PathScanner {
                     BlockPos checkPos = offsetPosition(start, direction, forward, sideways, expectedYLevel + vertical);
 
                     // Only check falling blocks above the tunnel
+                    // Check falling blocks at consistent height above current path
                     boolean checkFalling = (sideways == 0 && vertical == 3);
+
+                    if (sideways == 0 && checkFalling) {
+                        System.out.println("DEBUG: Checking falling blocks at total offset: " +
+                            (expectedYLevel + vertical) + " (should be 3)");
+                    }
 
                     HazardType hazard = checkBlock(world, checkPos, vertical, strictGround, forward, sideways, checkFalling);
                     if (hazard != HazardType.NONE) {
@@ -240,6 +254,24 @@ public class PathScanner {
 
         // Check for falling blocks only if checkFalling is true
         if (checkFalling && isFallingBlock(block)) {
+            // DEBUG: Print detailed information about the gravel detection
+            System.out.println("=== GRAVEL DETECTED ===");
+            System.out.println("Block position: " + pos);
+            System.out.println("Block type: " + block);
+            System.out.println("Forward distance: " + forwardDist);
+            System.out.println("Vertical offset: " + yOffset);
+            System.out.println("Player Y: " + mc.player.getY());
+            System.out.println("Player BlockPos Y: " + mc.player.getBlockPos().getY());
+
+            // Fixed calculations
+            // Player head is in the second block up from feet
+            int playerHeadBlockY = mc.player.getBlockPos().getY() + 1;
+            int blocksAboveHeadBlock = pos.getY() - playerHeadBlockY;
+
+            System.out.println("Player head block Y: " + playerHeadBlockY);
+            System.out.println("Blocks above head block: " + blocksAboveHeadBlock);
+            System.out.println("====================");
+
             return HazardType.FALLING_BLOCK;
         }
 
@@ -292,9 +324,7 @@ public class PathScanner {
             block == Blocks.GRAVEL ||
             block == Blocks.ANVIL ||
             block == Blocks.CHIPPED_ANVIL ||
-            block == Blocks.DAMAGED_ANVIL ||
-            block == Blocks.POINTED_DRIPSTONE ||
-            block == Blocks.DRIPSTONE_BLOCK;
+            block == Blocks.DAMAGED_ANVIL;
     }
 
     private boolean isDangerousBlock(Block block) {
@@ -304,7 +334,6 @@ public class PathScanner {
             block == Blocks.MAGMA_BLOCK ||
             block == Blocks.WITHER_ROSE ||
             block == Blocks.SWEET_BERRY_BUSH ||
-            block == Blocks.POINTED_DRIPSTONE ||
             block == Blocks.POWDER_SNOW ||
             block == Blocks.CACTUS;
     }
