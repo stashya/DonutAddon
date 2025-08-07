@@ -17,12 +17,6 @@ public class RotationController {
     private boolean isRotating = false;
     private Runnable callback;
 
-    // Rotation state for smooth rotation
-    private int overshootTicks = 0;
-    private float overshootAmount = 0;
-    private int pitchOvershootTicks = 0;
-    private float pitchOvershootAmount = 0;
-
     // Settings (passed from main module)
     private boolean smoothRotation = true;
     private double baseSpeed = 4.5;
@@ -62,25 +56,7 @@ public class RotationController {
         currentRotationSpeed = 0;
         currentPitchSpeed = 0;
 
-        // Setup overshoot for yaw if human-like
-        if (humanLike && random.nextDouble() < overshootChance) {
-            float totalRotation = MathHelper.wrapDegrees(targetYaw - currentYaw);
-            overshootAmount = (3 + random.nextFloat() * 4) * (totalRotation > 0 ? 1 : -1);
-            overshootTicks = 10 + random.nextInt(15);
-        } else {
-            overshootAmount = 0;
-            overshootTicks = 0;
-        }
-
-        // Setup overshoot for pitch if human-like and pitch needs significant change
-        float pitchDifference = Math.abs(targetPitch - currentPitch);
-        if (humanLike && pitchDifference > 10 && random.nextDouble() < overshootChance * 0.7) {
-            pitchOvershootAmount = (2 + random.nextFloat() * 3) * (targetPitch > currentPitch ? 1 : -1);
-            pitchOvershootTicks = 8 + random.nextInt(12);
-        } else {
-            pitchOvershootAmount = 0;
-            pitchOvershootTicks = 0;
-        }
+        // No overshoot setup - removed overshoot logic
     }
 
     public void update() {
@@ -99,14 +75,8 @@ public class RotationController {
     }
 
     private boolean updateYaw() {
-        // Calculate angle to target
-        float actualTarget = targetYaw;
-        if (overshootTicks > 0) {
-            actualTarget = targetYaw + overshootAmount;
-            overshootTicks--;
-        }
-
-        float deltaAngle = MathHelper.wrapDegrees(actualTarget - currentYaw);
+        // Calculate angle to target (no overshoot)
+        float deltaAngle = MathHelper.wrapDegrees(targetYaw - currentYaw);
         float distance = Math.abs(deltaAngle);
 
         // Dynamic speed based on distance
@@ -150,18 +120,12 @@ public class RotationController {
         setYawAngle(currentYaw);
 
         // Check if we've reached the target
-        return distance < 0.5f || (overshootTicks == 0 && distance < 2);
+        return distance < 0.5f;
     }
 
     private boolean updatePitch() {
-        // Calculate angle to target
-        float actualTarget = targetPitch;
-        if (pitchOvershootTicks > 0) {
-            actualTarget = targetPitch + pitchOvershootAmount;
-            pitchOvershootTicks--;
-        }
-
-        float deltaAngle = actualTarget - currentPitch;
+        // Calculate angle to target (no overshoot)
+        float deltaAngle = targetPitch - currentPitch;
         float distance = Math.abs(deltaAngle);
 
         // Dynamic speed based on distance (slightly slower than yaw for realism)
@@ -200,7 +164,7 @@ public class RotationController {
         setPitchAngle(currentPitch);
 
         // Check if we've reached the target
-        return distance < 0.5f || (pitchOvershootTicks == 0 && distance < 1.5);
+        return distance < 0.5f;
     }
 
     private void setYawAngle(float yawAngle) {
