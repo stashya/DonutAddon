@@ -145,7 +145,7 @@ public class PathScanner {
                     BlockPos checkPos = offsetPosition(start, direction, forward, sideways, expectedYLevel + vertical);
 
                     // Only check falling blocks above the tunnel
-                    boolean checkFalling = (sideways == 0 && vertical >= tunnelHeight);
+                    boolean checkFalling = (sideways == 0 && vertical == 3);
 
                     HazardType hazard = checkBlock(world, checkPos, vertical, strictGround, forward, sideways, checkFalling);
                     if (hazard != HazardType.NONE) {
