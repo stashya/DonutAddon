@@ -19,20 +19,20 @@ import net.minecraft.util.math.BlockPos;
 import net.minecraft.util.math.ChunkPos;
 import net.minecraft.util.math.Direction;
 import net.minecraft.util.math.Vec3d;
+import meteordevelopment.meteorclient.events.render.Render3DEvent;
+import meteordevelopment.meteorclient.renderer.ShapeMode;
+import meteordevelopment.meteorclient.utils.render.color.Color;
+
+
 
 import java.util.HashSet;
 import java.util.List;
 import java.util.Set;
 
 public class AIStashFinder extends Module {
-    private boolean isBaritoneAvailable() {
-        try {
-            Class.forName("baritone.api.BaritoneAPI");
-            return true;
-        } catch (ClassNotFoundException e) {
-            return false;
-        }
-    }
+    private final Set<BlockPos> hazardBlocks = new HashSet<>();
+    private final Color hazardColor = new Color(255, 0, 0, 125); // Red with transparency
+    private final Color hazardLineColor = new Color(255, 0, 0, 255);
 
     private final SettingGroup sgGeneral = settings.getDefaultGroup();
     private final SettingGroup sgSafety = settings.createGroup("Safety");
@@ -59,6 +59,21 @@ public class AIStashFinder extends Module {
         .name("disconnect-on-base-find")
         .description("Disconnect from server when a base is found.")
         .defaultValue(true)
+        .build()
+    );
+
+    private final Setting<Boolean> showHazards = sgGeneral.add(new BoolSetting.Builder()
+        .name("show-hazards")
+        .description("Highlight blocks that cause direction changes.")
+        .defaultValue(true)
+        .build()
+    );
+
+    private final Setting<ShapeMode> hazardShapeMode = sgGeneral.add(new EnumSetting.Builder<ShapeMode>()
+        .name("hazard-shape-mode")
+        .description("How to render hazard blocks.")
+        .defaultValue(ShapeMode.Both)
+        .visible(showHazards::get)
         .build()
     );
 
@@ -113,7 +128,7 @@ public class AIStashFinder extends Module {
     private final Setting<Integer> scanWidthFluids = sgSafety.add(new IntSetting.Builder()
         .name("scan-width-fluids")
         .description("Scan width for fluids like lava and water.")
-        .defaultValue(4)
+        .defaultValue(2)
         .range(2, 6)
         .sliderRange(2, 6)
         .visible(() -> false)
@@ -133,7 +148,7 @@ public class AIStashFinder extends Module {
     private final Setting<Boolean> strictGroundCheck = sgSafety.add(new BoolSetting.Builder()
         .name("strict-ground-check")
         .description("Require solid ground for entire scan area.")
-        .defaultValue(true)
+        .defaultValue(false)
         .visible(() -> false)
         .build()
     );
@@ -203,6 +218,10 @@ public class AIStashFinder extends Module {
     private SafetyValidator safetyValidator;
     private BacktrackManager backtrackManager;
     private RotationController rotationController;
+    private final SimpleSneakCentering centeringHelper = new SimpleSneakCentering();
+    private ParkourHelper parkourHelper;
+    private boolean centeringForHazard = false;
+
 
     // Mining tracking
     private int blocksMined = 0;
@@ -220,17 +239,22 @@ public class AIStashFinder extends Module {
         super(DonutAddon.CATEGORY, "AI-StashFinder", "(Beta) Automatically mines bases below Y=-30 with safety scanning and base detection.");
     }
 
+    @EventHandler
+    private void onRender(Render3DEvent event) {
+        if (!showHazards.get() || hazardBlocks.isEmpty()) return;
+
+        synchronized (hazardBlocks) {
+            for (BlockPos pos : hazardBlocks) {
+                event.renderer.box(pos, hazardLineColor, hazardColor, hazardShapeMode.get(), 0);
+            }
+        }
+    }
+
     @Override
     public void onActivate() {
         // Null check for safety
         if (mc.player == null) {
             error("Player is null! Cannot activate module.");
-            toggle();
-            return;
-        }
-
-        if (!isBaritoneAvailable()) {
-            error("Baritone is required to use AI-StashFinder! Please install Baritone mod from https://github.com/cabaletta/baritone");
             toggle();
             return;
         }
@@ -246,9 +270,11 @@ public class AIStashFinder extends Module {
         try {
             directionManager = new DirectionManager();
             pathScanner = new PathScanner();
+            pathScanner.updateTunnelDimensions(3, 3);
             safetyValidator = new SafetyValidator();
             backtrackManager = new BacktrackManager();
             rotationController = new RotationController();
+            parkourHelper = new ParkourHelper();
         } catch (Exception e) {
             error("Failed to initialize components: " + e.getMessage());
             toggle();
@@ -271,9 +297,20 @@ public class AIStashFinder extends Module {
             mc.options.attackKey.setPressed(false);
             mc.options.forwardKey.setPressed(false);
         }
+
+        // Stop centering if active
+        if (centeringHelper != null) {
+            centeringHelper.stopCentering();
+        }
+        synchronized (hazardBlocks) {
+            hazardBlocks.clear();
+        }
         currentState = MiningState.IDLE;
         if (safetyValidator != null) {
             safetyValidator.reset();
+        }
+        if (parkourHelper != null) {
+            parkourHelper.reset(); // ADD THIS LINE
         }
         processedChunks.clear();
         info("AIBaseFinder deactivated.");
@@ -357,6 +394,10 @@ public class AIStashFinder extends Module {
             overshootChance.get()
         );
 
+        if (parkourHelper != null) {
+            parkourHelper.update();
+        }
+
         // Check if we should continue
         if (!safetyValidator.canContinue(mc.player, yLevel.get())) {
             error("Safety validation failed!");
@@ -364,11 +405,6 @@ public class AIStashFinder extends Module {
             return;
         }
 
-        // Check if stuck and should jump
-        if (safetyValidator.checkStuck(mc.player)) {
-            error("Stopping (Beta Version)");
-            mc.player.jump();
-        }
 
         // Check for pickaxe
         FindItemResult pickaxe = InvUtils.findInHotbar(this::isTool);
@@ -438,8 +474,21 @@ public class AIStashFinder extends Module {
     }
 
     private void handleCentering() {
-        //PlayerUtils.centerPlayer();
+        if (!centeringHelper.isCentering()) {
+            if (!centeringHelper.startCentering()) {
+                // Already centered
+                proceedAfterCentering();
+                return;
+            }
+        }
 
+        if (!centeringHelper.tick()) {
+            // Centering complete
+            proceedAfterCentering();
+        }
+    }
+
+    private void proceedAfterCentering() {
         float yaw = mc.player.getYaw();
         Direction initialDir = getCardinalDirection(yaw);
         directionManager.setInitialDirection(initialDir);
@@ -447,7 +496,8 @@ public class AIStashFinder extends Module {
         float targetYaw = directionToYaw(initialDir);
         currentState = MiningState.ROTATING;
 
-        rotationController.startRotation(targetYaw, () -> {
+        // UPDATED: Added 0.0f for pitch
+        rotationController.startRotation(targetYaw, 0.0f, () -> {
             backtrackManager.startNewSegment(initialDir, mc.player.getPos());
             currentState = MiningState.SCANNING;
         });
@@ -456,7 +506,20 @@ public class AIStashFinder extends Module {
     private void handleScanning() {
         BlockPos playerPos = mc.player.getBlockPos();
         Direction currentDir = directionManager.getCurrentDirection();
+        if (!parkourHelper.isJumping()) {
+            ParkourHelper.JumpCheck jumpCheck = parkourHelper.checkJumpOpportunity(mc.player, currentDir);
 
+            if (jumpCheck.shouldJump) {
+                // We can jump, so start mining and let handleMining deal with the jump
+                currentState = MiningState.MINING;
+                blocksMined = 0;
+                scanTicks = 0;
+                lastPos = mc.player.getPos();
+                mc.options.attackKey.setPressed(true);
+                mc.options.forwardKey.setPressed(true);
+                return;
+            }
+        }
         PathScanner.ScanResult result = pathScanner.scanDirection(
             playerPos,
             currentDir,
@@ -466,6 +529,9 @@ public class AIStashFinder extends Module {
         );
 
         if (result.isSafe()) {
+            synchronized (hazardBlocks) {
+                hazardBlocks.clear();
+            }
             currentState = MiningState.MINING;
             blocksMined = 0;
             scanTicks = 0;
@@ -473,6 +539,12 @@ public class AIStashFinder extends Module {
             mc.options.attackKey.setPressed(true);
             mc.options.forwardKey.setPressed(true);
         } else {
+            if (showHazards.get()) {
+                synchronized (hazardBlocks) {
+                    hazardBlocks.clear();
+                    hazardBlocks.addAll(result.getHazardPositions());
+                }
+            }
             String hazardName = getHazardName(result.getHazardType());
             warning(hazardName + " detected, changing direction");
             currentState = MiningState.HAZARD_DETECTED;
@@ -492,6 +564,19 @@ public class AIStashFinder extends Module {
         Vec3d currentPos = mc.player.getPos();
         scanTicks++;
 
+        if (!parkourHelper.isJumping()) {
+            Direction currentDir = directionManager.getCurrentDirection();
+            ParkourHelper.JumpCheck jumpCheck = parkourHelper.checkJumpOpportunity(mc.player, currentDir);
+
+            if (jumpCheck.shouldJump) {
+                info("Jumping over obstacle: " + jumpCheck.reason);
+                // Don't stop mining keys, just initiate jump
+                if (parkourHelper.startJump(jumpCheck.targetPos)) {
+                    // Continue mining after jump
+                    return;
+                }
+            }
+        }
         if (scanTicks >= scanFrequency.get()) {
             scanTicks = 0;
 
@@ -507,6 +592,12 @@ public class AIStashFinder extends Module {
             );
 
             if (!result.isSafe() && result.getHazardDistance() <= safetyMargin.get()) {
+                if (showHazards.get()) {
+                    synchronized (hazardBlocks) {
+                        hazardBlocks.clear();
+                        hazardBlocks.addAll(result.getHazardPositions());
+                    }
+                }
                 String hazardName = getHazardName(result.getHazardType());
                 warning(hazardName + " detected, changing direction");
                 mc.options.attackKey.setPressed(false);
@@ -558,7 +649,17 @@ public class AIStashFinder extends Module {
         mc.options.attackKey.setPressed(false);
         mc.options.forwardKey.setPressed(false);
 
-        //PlayerUtils.centerPlayer();
+        BlockPos currentBlock = mc.player.getBlockPos();
+        double offsetX = Math.abs(mc.player.getX() - (currentBlock.getX() + 0.5));
+        double offsetZ = Math.abs(mc.player.getZ() - (currentBlock.getZ() + 0.5));
+
+        if (offsetX > 0.15 || offsetZ > 0.15) {
+            // Not centered, switch to centering state
+            centeringForHazard = true;
+            currentState = MiningState.CENTERING;
+            return;
+        }
+
 
         Direction currentDir = directionManager.getCurrentDirection();
         directionManager.recordHazard(currentDir, 0);
@@ -576,7 +677,10 @@ public class AIStashFinder extends Module {
                 float targetYaw = directionToYaw(currentBacktrackPlan.retraceDirection);
                 currentState = MiningState.ROTATING;
 
-                rotationController.startRotation(targetYaw, () -> {
+                rotationController.startRotation(targetYaw, 0.0f, () -> {
+                    synchronized (hazardBlocks) {
+                        hazardBlocks.clear();
+                    }
                     currentState = MiningState.RETRACING;
                     backtrackManager.startRetrace(currentBacktrackPlan.retraceDistance);
                     lastPos = mc.player.getPos();
@@ -600,7 +704,7 @@ public class AIStashFinder extends Module {
         float targetYaw = directionToYaw(choice.direction);
         currentState = MiningState.ROTATING;
 
-        rotationController.startRotation(targetYaw, () -> {
+        rotationController.startRotation(targetYaw, 0.0f, () -> {
             backtrackManager.startNewSegment(pendingDirection, mc.player.getPos());
             currentState = MiningState.SCANNING;
         });
@@ -625,7 +729,8 @@ public class AIStashFinder extends Module {
         float targetYaw = directionToYaw(currentBacktrackPlan.backtrackDirection);
         currentState = MiningState.ROTATING;
 
-        rotationController.startRotation(targetYaw, () -> {
+        // UPDATED: Added 0.0f for pitch
+        rotationController.startRotation(targetYaw, 0.0f, () -> {
             currentState = MiningState.BACKTRACKING;
             backtrackManager.startBacktrack(currentBacktrackPlan.backtrackDistance);
             lastPos = mc.player.getPos();
@@ -661,7 +766,7 @@ public class AIStashFinder extends Module {
                 float targetYaw = directionToYaw(choice.direction);
                 currentState = MiningState.ROTATING;
 
-                rotationController.startRotation(targetYaw, () -> {
+                rotationController.startRotation(targetYaw, 0.0f, () -> {
                     backtrackManager.startNewSegment(pendingDirection, mc.player.getPos());
                     currentState = MiningState.SCANNING;
                 });
