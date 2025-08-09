@@ -363,7 +363,6 @@ public class AIStashFinder extends Module {
         synchronized (waypointBlocks) {
             waypointBlocks.clear();
         }
-
         currentState = MiningState.IDLE;
         if (safetyValidator != null) {
             safetyValidator.reset();
@@ -522,7 +521,6 @@ public class AIStashFinder extends Module {
             overshootChance.get()
         );
 
-        // Update helpers
         if (parkourHelper != null) {
             parkourHelper.update();
         }
@@ -861,6 +859,7 @@ public class AIStashFinder extends Module {
         }
 
         BlockPos playerPos = mc.player.getBlockPos();
+
 
         // Check for parkour opportunities
         if (!parkourHelper.isJumping()) {

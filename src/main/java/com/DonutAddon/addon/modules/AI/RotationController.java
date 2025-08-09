@@ -86,7 +86,6 @@ public class RotationController {
     }
 
     private boolean updateYaw() {
-        // Calculate angle to target
         float deltaAngle = MathHelper.wrapDegrees(targetYaw - currentYaw);
         float distance = Math.abs(deltaAngle);
 
@@ -172,7 +171,6 @@ public class RotationController {
             }
             return true;
         }
-
         // Dynamic speed based on distance (slightly slower than yaw for realism)
         float targetSpeed;
         if (distance > 30) {

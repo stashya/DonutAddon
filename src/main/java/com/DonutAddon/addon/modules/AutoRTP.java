@@ -7,6 +7,7 @@ import meteordevelopment.meteorclient.events.world.TickEvent;
 import meteordevelopment.meteorclient.settings.*;
 import meteordevelopment.meteorclient.systems.modules.Categories;
 import meteordevelopment.meteorclient.systems.modules.Module;
+import meteordevelopment.meteorclient.utils.network.MeteorExecutor;
 import meteordevelopment.meteorclient.utils.player.ChatUtils;
 import meteordevelopment.meteorclient.utils.render.MeteorToast;
 import meteordevelopment.orbit.EventHandler;
@@ -21,10 +22,10 @@ public class AutoRTP extends Module {
     private final SettingGroup sgGeneral = settings.getDefaultGroup();
 
     private final Setting<Region> region = sgGeneral.add(new EnumSetting.Builder<Region>()
-        .name("region")
-        .description("The region to RTP to.")
-        .defaultValue(Region.EU_CENTRAL)
-        .build()
+            .name("region")
+            .description("The region to RTP to.")
+            .defaultValue(Region.EU_CENTRAL)
+            .build()
     );
 
     public enum Region {
@@ -64,7 +65,6 @@ public class AutoRTP extends Module {
 
     private State state = State.IDLE;
     private int tickTimer = 0;
-    private BlockPos lastPos = null;
     private BlockPos teleportPos = null;
     private int attempts = 0;
     private boolean canRtp = true;
@@ -88,25 +88,22 @@ public class AutoRTP extends Module {
     public void onActivate() {
         state = State.IDLE;
         tickTimer = 0;
-        lastPos = null;
         teleportPos = null;
         attempts = 0;
         canRtp = true;
         teleportCount = 0;
 
-        if (mc.player != null) {
-            lastPos = mc.player.getBlockPos();
+        if (mc.player == null) return;
 
-            // Check if we can RTP based on time
-            long timeSinceLastRtp = System.currentTimeMillis() - lastRtpTime;
-            if (lastRtpTime > 0 && timeSinceLastRtp < (RTP_COOLDOWN * 1000L)) {
-                int remainingSeconds = (int)((RTP_COOLDOWN * 1000L - timeSinceLastRtp) / 1000L);
-                state = State.COOLDOWN;
-                tickTimer = (RTP_COOLDOWN - remainingSeconds) * 20;
-            } else {
-                // Send first RTP immediately if cooldown is clear
-                sendRTP();
-            }
+        // Check if we can RTP based on time
+        long timeSinceLastRtp = System.currentTimeMillis() - lastRtpTime;
+        if (lastRtpTime > 0 && timeSinceLastRtp < (RTP_COOLDOWN * 1000L)) {
+            int remainingSeconds = (int) ((RTP_COOLDOWN * 1000L - timeSinceLastRtp) / 1000L);
+            state = State.COOLDOWN;
+            tickTimer = (RTP_COOLDOWN - remainingSeconds) * 20;
+        } else {
+            // Send first RTP immediately if cooldown is clear
+            sendRTP();
         }
     }
 
@@ -122,96 +119,92 @@ public class AutoRTP extends Module {
 
         // Check for RTP cooldown message
         Matcher cooldownMatcher = RTP_COOLDOWN_PATTERN.matcher(message);
-        if (cooldownMatcher.find()) {
-            int remainingSeconds = Integer.parseInt(cooldownMatcher.group(1));
+        if (!cooldownMatcher.find()) return;
+        int remainingSeconds = Integer.parseInt(cooldownMatcher.group(1));
 
-            // Sync our cooldown with server
-            state = State.COOLDOWN;
-            tickTimer = (RTP_COOLDOWN - remainingSeconds) * 20;
-            canRtp = false;
-        }
+        // Sync our cooldown with server
+        state = State.COOLDOWN;
+        tickTimer = (RTP_COOLDOWN - remainingSeconds) * 20;
+        canRtp = false;
     }
 
     @EventHandler
     private void onPacketReceive(PacketEvent.Receive event) {
         if (!(event.packet instanceof PlayerPositionLookS2CPacket)) return;
+        if (mc.player == null) return;
 
         // Always process teleport packets to stay in sync with server
-        if (mc.player != null) {
-            // Schedule position check with a small delay to ensure position is updated
-            new Thread(() -> {
-                try {
-                    Thread.sleep(100); // 100ms delay for position to update
-                } catch (InterruptedException e) {
-                    e.printStackTrace();
+        // Schedule position check with a small delay to ensure position is updated
+        new Thread(() -> {
+            try {
+                Thread.sleep(100); // 100ms delay for position to update
+            } catch (InterruptedException e) {
+                e.printStackTrace();
+            }
+
+            MeteorExecutor.execute(() -> {
+                BlockPos newPos = mc.player.getBlockPos();
+
+                // If we're in cooldown but receive a teleport, it's likely from a previous RTP
+                if (state == State.COOLDOWN || state == State.IDLE) {
+                    teleportPos = newPos;
+                    lastRtpTime = System.currentTimeMillis();
+
+                    // Check if this completed teleport has good coordinates
+                    if (!isNearSpawn(newPos) && checkCoordinates(newPos)) {
+                        mc.getToastManager().add(new MeteorToast(
+                                Items.DRAGON_EGG,
+                                "Found Good Coordinates",
+                                "Good Luck!"
+                        ));
+                        toggle();
+                        return;
+                    }
+
+                    // Reset cooldown timer since we just teleported
+                    state = State.COOLDOWN;
+                    tickTimer = 0;
+                    canRtp = false;
+                    return;
                 }
 
-                mc.execute(() -> {
-                    if (mc.player != null) {
-                        BlockPos newPos = mc.player.getBlockPos();
+                if (state == State.WAITING_FOR_SPAWN_TP || state == State.WAITING_FOR_FINAL_TP || state == State.COMMAND_SENT) {
+                    teleportCount++;
+                    info("State: %s, Teleport #%d at X=%d, Z=%d", state.toString(), teleportCount, newPos.getX(), newPos.getZ());
 
-                        // If we're in cooldown but receive a teleport, it's likely from a previous RTP
-                        if (state == State.COOLDOWN || state == State.IDLE) {
-                            teleportPos = newPos;
-                            lastRtpTime = System.currentTimeMillis();
+                    // Check if this is spawn teleport
+                    if (isNearSpawn(newPos)) {
+                        info("Detected spawn teleport");
+                        state = State.WAITING_FOR_FINAL_TP;
+                        tickTimer = 0;
+                        teleportCount = 1; // Reset count as spawn is first teleport
+                    } else {
+                        // This is the final teleport
+                        teleportPos = newPos;
 
-                            // Check if this completed teleport has good coordinates
-                            if (!isNearSpawn(newPos) && checkCoordinates(newPos)) {
-                                mc.getToastManager().add(new MeteorToast(
+                        info("RTP completed (attempt #%d)", attempts);
+
+                        state = State.TELEPORT_COMPLETE;
+                        tickTimer = 0;
+                        teleportCount = 0;
+
+                        // Check if coordinates are good
+                        if (checkCoordinates(teleportPos)) {
+                            mc.getToastManager().add(new MeteorToast(
                                     Items.DRAGON_EGG,
                                     "Found Good Coordinates",
                                     "Good Luck!"
-                                ));
-                                toggle();
-                                return;
-                            }
-
-                            // Reset cooldown timer since we just teleported
+                            ));
+                            toggle();
+                        } else {
+                            info("(highlight)Bad coords(default), trying again. (highlight)Stay still(default).");
                             state = State.COOLDOWN;
-                            tickTimer = 0;
                             canRtp = false;
-                            return;
-                        }
-
-                        if (state == State.WAITING_FOR_SPAWN_TP || state == State.WAITING_FOR_FINAL_TP || state == State.COMMAND_SENT) {
-                            teleportCount++;
-                            info("State: %s, Teleport #%d at X=%d, Z=%d", state.toString(), teleportCount, newPos.getX(), newPos.getZ());
-
-                            // Check if this is spawn teleport
-                            if (isNearSpawn(newPos)) {
-                                info("Detected spawn teleport");
-                                state = State.WAITING_FOR_FINAL_TP;
-                                tickTimer = 0;
-                                teleportCount = 1; // Reset count as spawn is first teleport
-                            } else {
-                                // This is the final teleport
-                                teleportPos = newPos;
-
-                                info("RTP completed (attempt #%d)", attempts);
-
-                                state = State.TELEPORT_COMPLETE;
-                                tickTimer = 0;
-                                teleportCount = 0;
-
-                                // Check if coordinates are good
-                                if (checkCoordinates(teleportPos)) {
-                                    mc.getToastManager().add(new MeteorToast(
-                                        Items.DRAGON_EGG,
-                                        "Found Good Coordinates",
-                                        "Good Luck!"
-                                    ));
-                                    toggle();
-                                } else {
-                                    info("(highlight)Bad coords(default), trying again. (highlight)Stay still(default).");
-                                    state = State.COOLDOWN;
-                                    canRtp = false;
-                                }
-                            }
                         }
                     }
-                });
-            }).start();
-        }
+                }
+            });
+        }).start();
     }
 
     @EventHandler
@@ -219,11 +212,6 @@ public class AutoRTP extends Module {
         if (mc.player == null) return;
 
         tickTimer++;
-
-        // Update last known position
-        if (state == State.IDLE || state == State.COOLDOWN) {
-            lastPos = mc.player.getBlockPos();
-        }
 
         switch (state) {
             case IDLE:
@@ -267,22 +255,18 @@ public class AutoRTP extends Module {
 
     private void sendRTP() {
         if (mc.player == null) return;
-
-        if (!canRtp) {
-            return;
-        }
+        if (!canRtp) return;
 
         // Check if enough time has passed since last RTP
         long timeSinceLastRtp = System.currentTimeMillis() - lastRtpTime;
         if (lastRtpTime > 0 && timeSinceLastRtp < (RTP_COOLDOWN * 1000L - 1000L)) {
             state = State.COOLDOWN;
-            tickTimer = (int)(timeSinceLastRtp / 1000) * 20;
+            tickTimer = (int) (timeSinceLastRtp / 1000) * 20;
             return;
         }
 
         attempts++;
         lastRtpTime = System.currentTimeMillis();
-        lastPos = mc.player.getBlockPos();
         teleportCount = 0;
 
         String command = "/rtp " + region.get().getCommand();
@@ -314,7 +298,8 @@ public class AutoRTP extends Module {
 
     private boolean isNearSpawn(BlockPos pos) {
         int dx = Math.abs(pos.getX() - SPAWN_POS.getX());
+        if (dx > SPAWN_RADIUS) return false;
         int dz = Math.abs(pos.getZ() - SPAWN_POS.getZ());
-        return dx <= SPAWN_RADIUS && dz <= SPAWN_RADIUS;
+        return dz <= SPAWN_RADIUS;
     }
 }

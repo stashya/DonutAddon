@@ -101,6 +101,39 @@ public class PathScanner {
         return false;
     }
 
+    private boolean isWalkablePath(World world, BlockPos groundPos, int forwardDist) {
+        BlockState groundState = world.getBlockState(groundPos);
+
+        // Direct ground is solid - good to walk
+        if (canWalkOn(world, groundPos, groundState)) {
+            return true;
+        }
+
+        // If air at expected ground level, check for 1-block drop
+        if (groundState.isAir()) {
+            // Check 1 block down
+            BlockPos oneDown = groundPos.down();
+            BlockState oneDownState = world.getBlockState(oneDown);
+
+            if (canWalkOn(world, oneDown, oneDownState)) {
+                // Safe 1-block drop
+                return true;
+            }
+
+            // For the very first block (forwardDist == 1), also accept if 2 blocks down is solid
+            // This handles the edge case where we're looking at the air space of a drop
+            if (forwardDist == 1) {
+                BlockPos twoDown = groundPos.down(2);
+                BlockState twoDownState = world.getBlockState(twoDown);
+                if (canWalkOn(world, twoDown, twoDownState)) {
+                    return true;
+                }
+            }
+        }
+
+        return false;
+    }
+
     public ScanResult scanDirection(BlockPos start, Direction direction, int depth, int height, boolean strictGround) {
         World world = mc.world;
         Set<BlockPos> detectedHazards = new HashSet<>();
@@ -124,6 +157,7 @@ public class PathScanner {
             for (int sideways = -scanWidthFluids; sideways <= scanWidthFluids; sideways++) {
                 for (int vertical = -1; vertical <= height; vertical++) {
                     // For fluids below player level (vertical < 0), only check the direct path
+
                     if (vertical < 0 && sideways != 0) {
                         continue;
                     }
@@ -145,12 +179,14 @@ public class PathScanner {
                 for (int vertical = -1; vertical <= height; vertical++) {
                     BlockPos checkPos = offsetPosition(start, direction, forward, sideways, expectedYLevel + vertical);
 
+
                     boolean checkFalling = (sideways == 0 && vertical == 3);
 
                     HazardType hazard = checkBlock(world, checkPos, vertical, strictGround, forward, sideways, checkFalling);
                     if (hazard != HazardType.NONE) {
                         // Check for special case of safe drops
                         if (hazard == HazardType.UNSAFE_GROUND && forward == 1 && vertical == -1) {
+
                             boolean foundGround = false;
                             for (int i = 0; i <= 2; i++) {
                                 if (canWalkOn(world, checkPos.down(i), world.getBlockState(checkPos.down(i)))) {
@@ -300,6 +336,7 @@ public class PathScanner {
                     }
                 }
             }
+            // Don't check side blocks at all - we only need 1-block wide path
         }
 
         // Check for falling blocks only if checkFalling is true
@@ -309,7 +346,6 @@ public class PathScanner {
             System.out.println("Block type: " + block);
             System.out.println("Forward distance: " + forwardDist);
             System.out.println("Vertical offset: " + yOffset);
-
             int playerHeadBlockY = mc.player.getBlockPos().getY() + 1;
             int blocksAboveHeadBlock = pos.getY() - playerHeadBlockY;
 
