@@ -30,6 +30,8 @@ import net.minecraft.util.math.ChunkPos;
 import net.minecraft.world.chunk.Chunk;
 import meteordevelopment.meteorclient.utils.render.MeteorToast;
 import net.minecraft.item.Items;
+import net.minecraft.item.Item;
+import net.minecraft.item.ItemStack;
 import com.DonutAddon.addon.modules.clusterfinder.*;
 
 import java.util.ArrayList;
@@ -38,40 +40,71 @@ import java.util.List;
 import java.util.Set;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
+import java.util.Map;
+import java.util.HashMap;
 
 
 public class ClusterFinder extends Module {
     private final SettingGroup sgGeneral = settings.getDefaultGroup();
 
-    // General
+    // General - Match BlockESP structure
 
-    private final Setting<ClusterBlockData> renderSettings = sgGeneral.add(new GenericSetting.Builder<ClusterBlockData>()
-            .name("colors")
-            .description("Configure how amethyst clusters are rendered.")
-            .defaultValue(
-                    new ClusterBlockData(
-                            ShapeMode.Lines,
-                            new SettingColor(138, 43, 226),  // Purple for amethyst
-                            new SettingColor(138, 43, 226, 25),
-                            true,
-                            new SettingColor(138, 43, 226, 125)
-                    )
+    private final Setting<List<Block>> blocks = sgGeneral.add(new BlockListSetting.Builder()
+        .name("blocks")
+        .description("Blocks to search for.")
+        .defaultValue(List.of(Blocks.AMETHYST_CLUSTER))
+        .onChanged(blocks1 -> {
+            if (isActive() && Utils.canUpdate()) onActivate();
+        })
+        .build()
+    );
+
+    private final Setting<ClusterBlockData> defaultBlockConfig = sgGeneral.add(new GenericSetting.Builder<ClusterBlockData>()
+        .name("default-block-config")
+        .description("Default block config.")
+        .defaultValue(
+            new ClusterBlockData(
+                ShapeMode.Lines,
+                new SettingColor(138, 43, 226),  // Purple for amethyst
+                new SettingColor(138, 43, 226, 25),
+                true,
+                new SettingColor(138, 43, 226, 125)
             )
-            .build()
+        )
+        .build()
+    );
+
+    private final Setting<Map<Block, ClusterBlockData>> blockConfigs = sgGeneral.add(new BlockDataSetting.Builder<ClusterBlockData>()
+        .name("block-configs")
+        .description("Config for each block.")
+        .defaultData(defaultBlockConfig)
+        .build()
     );
 
     private final Setting<Boolean> tracers = sgGeneral.add(new BoolSetting.Builder()
-            .name("tracers")
-            .description("Render tracer lines.")
-            .defaultValue(false)
-            .build()
+        .name("tracers")
+        .description("Render tracer lines.")
+        .defaultValue(false)
+        .build()
     );
 
     private final Setting<Boolean> notifications = sgGeneral.add(new BoolSetting.Builder()
-            .name("notifications")
-            .description("Show a toast when an amethyst cluster is detected")
-            .defaultValue(false)
-            .build()
+        .name("notifications")
+        .description("Show a toast when a matching block is detected")
+        .defaultValue(false)
+        .build()
+    );
+
+    private final Setting<Integer> maxToasts = sgGeneral.add(new IntSetting.Builder()
+        .name("max-toasts")
+        .description("Maximum number of toasts to show at once.")
+        .defaultValue(5)
+        .min(1)
+        .max(20)
+        .sliderMin(1)
+        .sliderMax(10)
+        .visible(notifications::get)
+        .build()
     );
 
     private final BlockPos.Mutable blockPos = new BlockPos.Mutable();
@@ -80,19 +113,10 @@ public class ClusterFinder extends Module {
     private final Set<ClusterGroup> groups = new ReferenceOpenHashSet<>();
     private final ExecutorService workerThread = Executors.newSingleThreadExecutor();
 
-    // Hardcoded to only search for amethyst clusters
-    private final List<Block> blocks = new ArrayList<>();
-
-    private long lastNotificationTime = 0;
-    private static final int NOTIFICATION_DELAY = 5; // 5 seconds between notifications
-
     private Dimension lastDimension;
 
     public ClusterFinder() {
-        super(DonutAddon.CATEGORY, "ClusterFinder", "Finds and highlights amethyst clusters.");
-
-        // Only search for amethyst clusters
-        blocks.add(Blocks.AMETHYST_CLUSTER);
+        super(DonutAddon.CATEGORY, "cluster-finder", "Finds and highlights specified blocks through walls.", "cluster-search");
 
         RainbowColors.register(this::onTickRainbow);
     }
@@ -109,12 +133,6 @@ public class ClusterFinder extends Module {
         }
 
         lastDimension = PlayerUtils.getDimension();
-        lastNotificationTime = 0;
-    }
-    @Override
-    public void toggle() {
-        super.toggle();
-        sendToggledMsg();
     }
 
     @Override
@@ -123,16 +141,18 @@ public class ClusterFinder extends Module {
             chunks.clear();
             groups.clear();
         }
-        lastNotificationTime = 0;
     }
 
     private void onTickRainbow() {
         if (!isActive()) return;
-        renderSettings.get().tickRainbow();
+
+        defaultBlockConfig.get().tickRainbow();
+        for (ClusterBlockData blockData : blockConfigs.get().values()) blockData.tickRainbow();
     }
 
     public ClusterBlockData getBlockData(Block block) {
-        return renderSettings.get();
+        ClusterBlockData blockData = blockConfigs.get().get(block);
+        return blockData == null ? defaultBlockConfig.get() : blockData;
     }
 
     private void updateChunk(int x, int z) {
@@ -172,27 +192,61 @@ public class ClusterFinder extends Module {
     private void searchChunk(Chunk chunk) {
         workerThread.submit(() -> {
             if (!isActive()) return;
-            ClusterChunk schunk = ClusterChunk.searchChunk(chunk, blocks);
+            ClusterChunk schunk = ClusterChunk.searchChunk(chunk, blocks.get());
 
-            if (schunk.size() > 0) {
-                // Handle notifications with delay
-                if (notifications.get()) {
-                    long currentTime = System.currentTimeMillis();
-                    if (currentTime - lastNotificationTime > NOTIFICATION_DELAY * 1000L) {
-                        lastNotificationTime = currentTime;
+            if (notifications.get() && schunk.size() > 0) {
+                int toastCount = 0;
+                int totalBlocks = schunk.blocks.size();
 
+                // Show summary toast if there are many blocks
+                if (totalBlocks > maxToasts.get()) {
+                    // Create appropriate block type string
+                    String blockType = "blocks";
+                    if (blocks.get().size() == 1) {
+                        Block firstBlock = blocks.get().get(0);
+                        if (firstBlock == Blocks.AMETHYST_CLUSTER) {
+                            blockType = "Amethyst Clusters";
+                        } else {
+                            blockType = new ItemStack(firstBlock.asItem()).getName().getString() + "s";
+                        }
+                    }
+
+                    mc.getToastManager().add(new MeteorToast(
+                        blocks.get().get(0).asItem(),
+                        title,
+                        String.format("Found %d %s in chunk (%d, %d)",
+                            totalBlocks, blockType, chunk.getPos().x, chunk.getPos().z)
+                    ));
+                } else {
+                    // Show individual toasts up to the limit
+                    for (Long posLong : schunk.blocks.keySet()) {
+                        if (toastCount >= maxToasts.get()) break;
+
+                        // Decode the BlockPos
+                        BlockPos bp = BlockPos.fromLong(posLong);
+
+                        // Grab icon & name from the world chunk
+                        Item icon = chunk.getBlockState(bp).getBlock().asItem();
+                        String name = new ItemStack(icon).getName().getString();
+
+                        // Fire the toast
                         mc.getToastManager().add(new MeteorToast(
-                                Items.AMETHYST_SHARD,
-                                title,
-                                "Found Amethyst Clusters!"
+                            icon,
+                            title,
+                            "Found " + name + " at " + bp
                         ));
+
+                        toastCount++;
                     }
                 }
+            }
 
+            if (schunk.size() > 0) {
                 synchronized (chunks) {
                     chunks.put(chunk.getPos().toLong(), schunk);
                     schunk.update();
 
+                    // Update neighbour chunks
                     updateChunk(chunk.getPos().x - 1, chunk.getPos().z);
                     updateChunk(chunk.getPos().x + 1, chunk.getPos().z);
                     updateChunk(chunk.getPos().x, chunk.getPos().z - 1);
@@ -204,6 +258,7 @@ public class ClusterFinder extends Module {
 
     @EventHandler
     private void onBlockUpdate(BlockUpdateEvent event) {
+        // Minecraft probably reuses the event.pos BlockPos instance
         int bx = event.pos.getX();
         int by = event.pos.getY();
         int bz = event.pos.getZ();
@@ -212,8 +267,8 @@ public class ClusterFinder extends Module {
         int chunkZ = bz >> 4;
         long key = ChunkPos.toLong(chunkX, chunkZ);
 
-        boolean added = blocks.contains(event.newState.getBlock()) && !blocks.contains(event.oldState.getBlock());
-        boolean removed = !added && !blocks.contains(event.newState.getBlock()) && blocks.contains(event.oldState.getBlock());
+        boolean added = blocks.get().contains(event.newState.getBlock()) && !blocks.get().contains(event.oldState.getBlock());
+        boolean removed = !added && !blocks.get().contains(event.newState.getBlock()) && blocks.get().contains(event.oldState.getBlock());
 
         if (added || removed) {
             workerThread.submit(() -> {
@@ -233,20 +288,19 @@ public class ClusterFinder extends Module {
                         chunk.add(blockPos);
 
                         if (notifications.get()) {
-                            long currentTime = System.currentTimeMillis();
-                            if (currentTime - lastNotificationTime > NOTIFICATION_DELAY * 1000L) {
-                                lastNotificationTime = currentTime;
+                            String blockName = new ItemStack(event.newState.getBlock().asItem())
+                                .getName().getString();
 
-                                mc.getToastManager().add(new MeteorToast(
-                                        Items.AMETHYST_SHARD,
-                                        title,
-                                        "Found Amethyst Cluster at " + event.pos.toShortString()
-                                ));
-                            }
+                            mc.getToastManager().add(new MeteorToast(
+                                event.newState.getBlock().asItem(),
+                                title,
+                                String.format("Found %s at %s", blockName, event.pos)
+                            ));
                         }
                     }
                     else chunk.remove(blockPos);
 
+                    // Update neighbour blocks
                     for (int x = -1; x < 2; x++) {
                         for (int z = -1; z < 2; z++) {
                             for (int y = -1; y < 2; y++) {

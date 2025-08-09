@@ -4,7 +4,7 @@ A powerful addon for Meteor Client featuring advanced mining automation and enha
 
 ## Features
 
-- **AI StashFinder**: Automated base mining below Y=-50 with intelligent pathfinding
+- **AI StashFinder**: Automated base mining below Y=-30 with intelligent pathfinding
 - **Advanced ESP Modules**:
     - Cluster Finder
     - Deepslate ESP (2 variants)

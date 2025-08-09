@@ -3,11 +3,13 @@ package com.DonutAddon.addon.modules.AI;
 public enum MiningState {
     IDLE,
     CENTERING,
-    SCANNING,
-    MINING,
+    CENTERING_AT_WAYPOINT,  // ADD THIS NEW STATE
+    SCANNING_PRIMARY,
+    MINING_PRIMARY,
     HAZARD_DETECTED,
+    CALCULATING_DETOUR,
+    FOLLOWING_DETOUR,
     ROTATING,
-    RETRACING,      // New state for going back in side tunnel
-    BACKTRACKING,
+    CHANGING_DIRECTION,
     STOPPED
 }

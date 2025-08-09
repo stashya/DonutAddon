@@ -103,6 +103,41 @@ public class HoleTunnelStairsESP extends Module {
         .sliderMax(10)
         .build()
     );
+    private final Setting<Boolean> detect3x3Tunnels = sgTParams.add(new BoolSetting.Builder()
+        .name("Detect 3x3 Tunnels")
+        .description("Also detect 3x3 tunnels in addition to 1-wide tunnels")
+        .defaultValue(true)
+        .build()
+    );
+    private final Setting<Integer> tunnel3x3Width = sgTParams.add(new IntSetting.Builder()
+        .name("3x3 Tunnel Width")
+        .description("Width of 3x3 tunnels to detect")
+        .defaultValue(3)
+        .min(3)
+        .max(5)
+        .sliderRange(3, 5)
+        .visible(detect3x3Tunnels::get)
+        .build()
+    );
+    private final Setting<Integer> tunnel3x3Height = sgTParams.add(new IntSetting.Builder()
+        .name("3x3 Tunnel Height")
+        .description("Height of 3x3 tunnels to detect")
+        .defaultValue(3)
+        .min(3)
+        .max(5)
+        .sliderRange(3, 5)
+        .visible(detect3x3Tunnels::get)
+        .build()
+    );
+    private final Setting<Integer> min3x3TunnelLength = sgTParams.add(new IntSetting.Builder()
+        .name("Min 3x3 Tunnel Length")
+        .description("Minimum length for 3x3 tunnels to be detected")
+        .defaultValue(3)
+        .min(1)
+        .sliderMax(20)
+        .visible(detect3x3Tunnels::get)
+        .build()
+    );
     private final Setting<Boolean> diagonals = sgTParams.add(new BoolSetting.Builder()
         .name("Detect Diagonal Tunnels.")
         .description("Detects diagonal tunnels when tunnels are selected to be detected.")
@@ -190,6 +225,20 @@ public class HoleTunnelStairsESP extends Module {
         .defaultValue(new SettingColor(0, 0, 255, 30))
         .build()
     );
+    private final Setting<SettingColor> tunnel3x3LineColor = sgRender.add(new ColorSetting.Builder()
+        .name("3x3-tunnel-line-color")
+        .description("The color of the lines for the 3x3 tunnels being rendered.")
+        .defaultValue(new SettingColor(0, 255, 255, 95))
+        .visible(detect3x3Tunnels::get)
+        .build()
+    );
+    private final Setting<SettingColor> tunnel3x3SideColor = sgRender.add(new ColorSetting.Builder()
+        .name("3x3-tunnel-side-color")
+        .description("The color of the sides for the 3x3 tunnels being rendered.")
+        .defaultValue(new SettingColor(0, 255, 255, 30))
+        .visible(detect3x3Tunnels::get)
+        .build()
+    );
     private final Setting<SettingColor> staircaseLineColor = sgRender.add(new ColorSetting.Builder()
         .name("staircase-line-color")
         .description("The color of the lines for the staircases being rendered.")
@@ -208,6 +257,7 @@ public class HoleTunnelStairsESP extends Module {
     private final Queue<Chunk> chunkQueue = new LinkedList<>();
     private final Set<Box> holes = Collections.newSetFromMap(new ConcurrentHashMap<>());
     private final Set<Box> tunnels = Collections.newSetFromMap(new ConcurrentHashMap<>());
+    private final Set<Box> tunnels3x3 = Collections.newSetFromMap(new ConcurrentHashMap<>());
     private final Set<Box> staircases = Collections.newSetFromMap(new ConcurrentHashMap<>());
     public HoleTunnelStairsESP() {
         super(DonutAddon.CATEGORY, "Hole/Tunnel/StairsESP", "Finds and highlights holes and tunnels and stairs.");
@@ -222,6 +272,7 @@ public class HoleTunnelStairsESP extends Module {
         chunkQueue.clear();
         holes.clear();
         tunnels.clear();
+        tunnels3x3.clear();
         staircases.clear();
     }
     @EventHandler
@@ -255,6 +306,7 @@ public class HoleTunnelStairsESP extends Module {
 
         removeBoxesOutsideRenderDistance(holes, chunkSet);
         removeBoxesOutsideRenderDistance(tunnels, chunkSet);
+        removeBoxesOutsideRenderDistance(tunnels3x3, chunkSet);
         removeBoxesOutsideRenderDistance(staircases, chunkSet);
     }
     private void removeBoxesOutsideRenderDistance(Set<Box> boxSet, Set<WorldChunk> worldChunks) {
@@ -270,11 +322,13 @@ public class HoleTunnelStairsESP extends Module {
             case ALL:
                 renderHoles(event.renderer);
                 renderTunnels(event.renderer);
+                render3x3Tunnels(event.renderer);
                 renderStaircases(event.renderer);
                 break;
             case HOLES_AND_TUNNELS:
                 renderHoles(event.renderer);
                 renderTunnels(event.renderer);
+                render3x3Tunnels(event.renderer);
                 break;
             case HOLES_AND_STAIRCASES:
                 renderHoles(event.renderer);
@@ -282,6 +336,7 @@ public class HoleTunnelStairsESP extends Module {
                 break;
             case TUNNELS_AND_STAIRCASES:
                 renderTunnels(event.renderer);
+                render3x3Tunnels(event.renderer);
                 renderStaircases(event.renderer);
                 break;
             case HOLES:
@@ -289,6 +344,7 @@ public class HoleTunnelStairsESP extends Module {
                 break;
             case TUNNELS:
                 renderTunnels(event.renderer);
+                render3x3Tunnels(event.renderer);
                 break;
             case STAIRCASES:
                 renderStaircases(event.renderer);
@@ -306,6 +362,13 @@ public class HoleTunnelStairsESP extends Module {
         if (tunnels != null) {
             for (Box box : tunnels) {
                 renderer.box(box.minX, box.minY, box.minZ, box.maxX, box.maxY, box.maxZ, tunnelSideColor.get(), tunnelLineColor.get(), shapeMode.get(), 0);
+            }
+        }
+    }
+    private void render3x3Tunnels(Renderer3D renderer) {
+        if (detect3x3Tunnels.get() && tunnels3x3 != null) {
+            for (Box box : tunnels3x3) {
+                renderer.box(box.minX, box.minY, box.minZ, box.maxX, box.maxY, box.maxZ, tunnel3x3SideColor.get(), tunnel3x3LineColor.get(), shapeMode.get(), 0);
             }
         }
     }
@@ -350,12 +413,14 @@ public class HoleTunnelStairsESP extends Module {
                                         checkHole(pos, holes);
                                         checkTunnel(pos);
                                         if (diagonals.get()) checkDiagonalTunnel(pos);
+                                        if (detect3x3Tunnels.get()) check3x3Tunnel(pos);
                                         checkStaircase(pos);
                                         break;
                                     case HOLES_AND_TUNNELS:
                                         checkHole(pos, holes);
                                         checkTunnel(pos);
                                         if (diagonals.get()) checkDiagonalTunnel(pos);
+                                        if (detect3x3Tunnels.get()) check3x3Tunnel(pos);
                                         break;
                                     case HOLES_AND_STAIRCASES:
                                         checkHole(pos, holes);
@@ -364,6 +429,7 @@ public class HoleTunnelStairsESP extends Module {
                                     case TUNNELS_AND_STAIRCASES:
                                         checkTunnel(pos);
                                         if (diagonals.get()) checkDiagonalTunnel(pos);
+                                        if (detect3x3Tunnels.get()) check3x3Tunnel(pos);
                                         checkStaircase(pos);
                                         break;
                                     case HOLES:
@@ -372,6 +438,7 @@ public class HoleTunnelStairsESP extends Module {
                                     case TUNNELS:
                                         checkTunnel(pos);
                                         if (diagonals.get()) checkDiagonalTunnel(pos);
+                                        if (detect3x3Tunnels.get()) check3x3Tunnel(pos);
                                         break;
                                     case STAIRCASES:
                                         checkStaircase(pos);
@@ -454,6 +521,130 @@ public class HoleTunnelStairsESP extends Module {
         }
         return true;
     }
+
+    private void check3x3Tunnel(BlockPos pos) {
+        for (Direction dir : DIRECTIONS) {
+            // Check if this could be the start of a 3x3 tunnel
+            if (isValid3x3TunnelStart(pos, dir)) {
+                BlockPos.Mutable currentPos = pos.mutableCopy();
+                int stepCount = 0;
+                BlockPos startPos = pos;
+                BlockPos endPos = pos;
+
+                // Move along the tunnel
+                while (is3x3TunnelSection(currentPos, dir)) {
+                    endPos = currentPos.toImmutable();
+                    currentPos.move(dir);
+                    stepCount++;
+                }
+
+                if (stepCount >= min3x3TunnelLength.get()) {
+                    // Create box for the entire 3x3 tunnel
+                    Box tunnelBox;
+                    int halfWidth = tunnel3x3Width.get() / 2;
+                    if (dir == Direction.NORTH || dir == Direction.SOUTH) {
+                        tunnelBox = new Box(
+                            startPos.getX() - halfWidth,
+                            startPos.getY(),
+                            Math.min(startPos.getZ(), endPos.getZ()),
+                            startPos.getX() + halfWidth + 1,
+                            startPos.getY() + tunnel3x3Height.get(),
+                            Math.max(startPos.getZ(), endPos.getZ()) + 1
+                        );
+                    } else {
+                        tunnelBox = new Box(
+                            Math.min(startPos.getX(), endPos.getX()),
+                            startPos.getY(),
+                            startPos.getZ() - halfWidth,
+                            Math.max(startPos.getX(), endPos.getX()) + 1,
+                            startPos.getY() + tunnel3x3Height.get(),
+                            startPos.getZ() + halfWidth + 1
+                        );
+                    }
+
+                    if (!tunnels3x3.contains(tunnelBox) && tunnels3x3.stream().noneMatch(existingTunnel -> existingTunnel.intersects(tunnelBox))) {
+                        tunnels3x3.add(tunnelBox);
+                    }
+                }
+            }
+        }
+    }
+
+    private boolean isValid3x3TunnelStart(BlockPos pos, Direction dir) {
+        // Check if this position could be the center of a 3x3 tunnel cross-section
+        int width = tunnel3x3Width.get();
+        int height = tunnel3x3Height.get();
+        int halfWidth = width / 2;
+
+        // Check floor and ceiling
+        for (int dx = -halfWidth; dx <= halfWidth; dx++) {
+            for (int dz = -halfWidth; dz <= halfWidth; dz++) {
+                if (dir == Direction.NORTH || dir == Direction.SOUTH) {
+                    // Check floor
+                    if (isPassableBlock(pos.add(dx, -1, 0))) return false;
+                    // Check ceiling
+                    if (isPassableBlock(pos.add(dx, height, 0))) return false;
+                } else {
+                    // Check floor
+                    if (isPassableBlock(pos.add(0, -1, dz))) return false;
+                    // Check ceiling
+                    if (isPassableBlock(pos.add(0, height, dz))) return false;
+                }
+            }
+        }
+
+        return true;
+    }
+
+    private boolean is3x3TunnelSection(BlockPos pos, Direction dir) {
+        int width = tunnel3x3Width.get();
+        int height = tunnel3x3Height.get();
+        int halfWidth = width / 2;
+
+        // Check if the 3x3 area is passable
+        for (int h = 0; h < height; h++) {
+            for (int w = -halfWidth; w <= halfWidth; w++) {
+                BlockPos checkPos;
+                if (dir == Direction.NORTH || dir == Direction.SOUTH) {
+                    checkPos = pos.add(w, h, 0);
+                } else {
+                    checkPos = pos.add(0, h, w);
+                }
+                if (!isPassableBlock(checkPos)) return false;
+            }
+        }
+
+        // Check walls (sides perpendicular to direction)
+        for (int h = 0; h < height; h++) {
+            if (dir == Direction.NORTH || dir == Direction.SOUTH) {
+                // Check east wall
+                if (isPassableBlock(pos.add(halfWidth + 1, h, 0))) return false;
+                // Check west wall
+                if (isPassableBlock(pos.add(-halfWidth - 1, h, 0))) return false;
+            } else {
+                // Check north wall
+                if (isPassableBlock(pos.add(0, h, -halfWidth - 1))) return false;
+                // Check south wall
+                if (isPassableBlock(pos.add(0, h, halfWidth + 1))) return false;
+            }
+        }
+
+        // Check floor and ceiling
+        for (int w = -halfWidth; w <= halfWidth; w++) {
+            BlockPos floorPos, ceilingPos;
+            if (dir == Direction.NORTH || dir == Direction.SOUTH) {
+                floorPos = pos.add(w, -1, 0);
+                ceilingPos = pos.add(w, height, 0);
+            } else {
+                floorPos = pos.add(0, -1, w);
+                ceilingPos = pos.add(0, height, w);
+            }
+            if (isPassableBlock(floorPos) || isPassableBlock(ceilingPos)) return false;
+        }
+
+        return true;
+    }
+
     private void checkDiagonalTunnel(BlockPos pos) {
         for (Direction dir : DIRECTIONS) {
             for (int i = minDiagonalWidth.get()-1; i < maxDiagonalWidth.get(); i++) {
