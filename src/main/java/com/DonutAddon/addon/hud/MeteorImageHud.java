@@ -22,7 +22,7 @@ public class MeteorImageHud {
     static {
         WATERMARK = INFO.addPreset("DonutClient Watermark", imageHud -> {
             // Configure for DonutClient watermark using the public method
-            imageHud.configureAsWatermark("/assets/donutaddon/textures/logo1.png", 120, 0.5);
+            imageHud.configureAsWatermark("/assets/donutaddon/textures/logo1.png", 120, 0.44);
         });
     }
 

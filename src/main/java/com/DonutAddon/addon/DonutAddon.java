@@ -30,7 +30,6 @@ public class DonutAddon extends MeteorAddon {
         Modules.get().add(new DeepslateESP2());
         Modules.get().add(new DripstoneESP());
         Modules.get().add(new StoneESP());
-        Modules.get().add(new AutoSpawnerBreakerBaritone());
         Modules.get().add(new AutoRocket());
         Modules.get().add(new AutoRTP());
         Modules.get().add(new HoleTunnelStairsESP());

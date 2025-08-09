@@ -172,7 +172,7 @@ public class SimpleSneakCentering {
 
     private void setPressed(KeyBinding key, boolean pressed) {
         key.setPressed(pressed);
-        Input.setKeyState(key, pressed);
+        Input.setKeyState(key, pressed);  // Add this line!
     }
 
     public boolean isCentering() {

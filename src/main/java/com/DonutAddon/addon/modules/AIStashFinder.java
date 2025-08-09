@@ -10,6 +10,7 @@ import meteordevelopment.meteorclient.utils.player.FindItemResult;
 import meteordevelopment.meteorclient.utils.player.InvUtils;
 import meteordevelopment.orbit.EventHandler;
 import net.minecraft.block.entity.*;
+import net.minecraft.client.option.KeyBinding;
 import net.minecraft.item.ItemStack;
 import net.minecraft.item.MiningToolItem;
 import net.minecraft.item.ShearsItem;
@@ -19,32 +20,40 @@ import net.minecraft.util.math.BlockPos;
 import net.minecraft.util.math.ChunkPos;
 import net.minecraft.util.math.Direction;
 import net.minecraft.util.math.Vec3d;
+import net.minecraft.util.math.MathHelper;
 import meteordevelopment.meteorclient.events.render.Render3DEvent;
 import meteordevelopment.meteorclient.renderer.ShapeMode;
 import meteordevelopment.meteorclient.utils.render.color.Color;
-
+import meteordevelopment.meteorclient.utils.misc.input.Input;
+import meteordevelopment.meteorclient.systems.modules.Modules;
+import meteordevelopment.meteorclient.systems.modules.player.AutoEat;
 
 
 import java.util.HashSet;
 import java.util.List;
+import java.util.Queue;
 import java.util.Set;
 
 public class AIStashFinder extends Module {
     private final Set<BlockPos> hazardBlocks = new HashSet<>();
+    private final Set<BlockPos> waypointBlocks = new HashSet<>(); // Debug: show waypoints
     private final Color hazardColor = new Color(255, 0, 0, 125); // Red with transparency
     private final Color hazardLineColor = new Color(255, 0, 0, 255);
+    private final Color waypointColor = new Color(0, 255, 0, 125); // Green for waypoints
+    private final Color waypointLineColor = new Color(0, 255, 0, 255);
 
     private final SettingGroup sgGeneral = settings.getDefaultGroup();
     private final SettingGroup sgSafety = settings.createGroup("Safety");
     private final SettingGroup sgRotation = settings.createGroup("Rotation");
+    private final SettingGroup sgDebug = settings.createGroup("Debug");
 
     // Visible settings
     private final Setting<Integer> scanDepth = sgGeneral.add(new IntSetting.Builder()
         .name("scan-depth")
         .description("How many blocks ahead to scan for hazards.")
-        .defaultValue(6)
-        .range(4, 10)
-        .sliderRange(4, 10)
+        .defaultValue(20)
+        .range(10, 30)
+        .sliderRange(10, 30)
         .build()
     );
 
@@ -94,6 +103,30 @@ public class AIStashFinder extends Module {
         .build()
     );
 
+    // Debug settings
+    private final Setting<Boolean> debugMode = sgDebug.add(new BoolSetting.Builder()
+        .name("debug-mode")
+        .description("Show debug information in chat.")
+        .defaultValue(true)
+        .build()
+    );
+
+    private final Setting<Boolean> showWaypoints = sgDebug.add(new BoolSetting.Builder()
+        .name("show-waypoints")
+        .description("Render waypoints for detours.")
+        .defaultValue(true)
+        .visible(debugMode::get)
+        .build()
+    );
+
+    private final Setting<Boolean> printHazardMap = sgDebug.add(new BoolSetting.Builder()
+        .name("print-hazard-map")
+        .description("Print local hazard map periodically.")
+        .defaultValue(false)
+        .visible(debugMode::get)
+        .build()
+    );
+
     // Hidden settings with fixed values
     private final Setting<Integer> yLevel = sgGeneral.add(new IntSetting.Builder()
         .name("y-level")
@@ -135,40 +168,10 @@ public class AIStashFinder extends Module {
         .build()
     );
 
-    private final Setting<Integer> safetyMargin = sgSafety.add(new IntSetting.Builder()
-        .name("safety-margin")
-        .description("Blocks before hazard to stop mining.")
-        .defaultValue(6)  // Changed from 4 to 6
-        .range(1, 6)      // Changed max from 4 to 6
-        .sliderRange(1, 6) // Changed max from 4 to 6
-        .visible(() -> false)
-        .build()
-    );
-
     private final Setting<Boolean> strictGroundCheck = sgSafety.add(new BoolSetting.Builder()
         .name("strict-ground-check")
         .description("Require solid ground for entire scan area.")
         .defaultValue(false)
-        .visible(() -> false)
-        .build()
-    );
-
-    private final Setting<Integer> scanFrequency = sgSafety.add(new IntSetting.Builder()
-        .name("scan-frequency")
-        .description("How often to scan for hazards while mining (in ticks).")
-        .defaultValue(1)
-        .range(1, 20)
-        .sliderRange(1, 20)
-        .visible(() -> false)
-        .build()
-    );
-
-    private final Setting<Integer> backtrackDistance = sgSafety.add(new IntSetting.Builder()
-        .name("backtrack-distance")
-        .description("How many blocks to go back when both sides are blocked.")
-        .defaultValue(20)
-        .range(10, 50)
-        .sliderRange(10, 50)
         .visible(() -> false)
         .build()
     );
@@ -211,47 +214,97 @@ public class AIStashFinder extends Module {
         .build()
     );
 
+    // Add to your settings section
+    private final Setting<Boolean> workInMenus = sgGeneral.add(new BoolSetting.Builder()
+        .name("work-in-menus")
+        .description("Continue mining while in GUIs/menus.")
+        .defaultValue(true)
+        .build()
+    );
+
+    private final Setting<Boolean> pauseForAutoEat = sgGeneral.add(new BoolSetting.Builder()
+        .name("pause-for-auto-eat")
+        .description("Pauses mining when AutoEat is active and eating.")
+        .defaultValue(true)
+        .build()
+    );
+
+
+    private void setPressed(KeyBinding key, boolean pressed) {
+        key.setPressed(pressed);
+        Input.setKeyState(key, pressed);  // This is the key part!
+    }
+
+    private void stopMovement() {
+        setPressed(mc.options.attackKey, false);
+        setPressed(mc.options.forwardKey, false);
+    }
+
+    private void startMining() {
+        setPressed(mc.options.attackKey, true);
+        setPressed(mc.options.forwardKey, true);
+    }
+
     // Module components
     private MiningState currentState = MiningState.IDLE;
-    private DirectionManager directionManager;
+    private DirectionalPathfinder pathfinder;
     private PathScanner pathScanner;
     private SafetyValidator safetyValidator;
-    private BacktrackManager backtrackManager;
     private RotationController rotationController;
     private final SimpleSneakCentering centeringHelper = new SimpleSneakCentering();
     private ParkourHelper parkourHelper;
-    private boolean centeringForHazard = false;
-
 
     // Mining tracking
     private int blocksMined = 0;
+    private int totalBlocksMined = 0;
     private Vec3d lastPos = Vec3d.ZERO;
     private int scanTicks = 0;
+    private static final int SCAN_INTERVAL = 20; // Scan every 20 ticks (1 second)
 
     // Current operation tracking
+    private BlockPos currentWaypoint;
+    private PathScanner.ScanResult lastHazardDetected;
     private Direction pendingDirection;
-    private BacktrackManager.BacktrackPlan currentBacktrackPlan;
+
+    // Debug tracking
+    private int tickCounter = 0;
+    private long moduleStartTime = 0;
+
+    private boolean wasPausedForEating = false;
+    private MiningState stateBeforeEating = MiningState.IDLE;
 
     // Stash detection
     private final Set<ChunkPos> processedChunks = new HashSet<>();
 
     public AIStashFinder() {
-        super(DonutAddon.CATEGORY, "AI-StashFinder", "(Beta) Automatically mines bases below Y=-30 with safety scanning and base detection.");
+        super(DonutAddon.CATEGORY, "AI-StashFinder", "(Beta) Automatically mines with directional persistence and intelligent pathfinding.");
     }
 
     @EventHandler
-    private void onRender(Render3DEvent event) {
-        if (!showHazards.get() || hazardBlocks.isEmpty()) return;
+    public void onRender(Render3DEvent event) {
+        // Render hazards
+        if (showHazards.get() && !hazardBlocks.isEmpty()) {
+            synchronized (hazardBlocks) {
+                for (BlockPos pos : hazardBlocks) {
+                    event.renderer.box(pos, hazardLineColor, hazardColor, hazardShapeMode.get(), 0);
+                }
+            }
+        }
 
-        synchronized (hazardBlocks) {
-            for (BlockPos pos : hazardBlocks) {
-                event.renderer.box(pos, hazardLineColor, hazardColor, hazardShapeMode.get(), 0);
+        // Render waypoints (debug)
+        if (debugMode.get() && showWaypoints.get() && !waypointBlocks.isEmpty()) {
+            synchronized (waypointBlocks) {
+                for (BlockPos pos : waypointBlocks) {
+                    event.renderer.box(pos, waypointLineColor, waypointColor, ShapeMode.Both, 0);
+                }
             }
         }
     }
 
     @Override
     public void onActivate() {
+        moduleStartTime = System.currentTimeMillis();
+
         // Null check for safety
         if (mc.player == null) {
             error("Player is null! Cannot activate module.");
@@ -268,11 +321,10 @@ public class AIStashFinder extends Module {
 
         // Initialize components
         try {
-            directionManager = new DirectionManager();
             pathScanner = new PathScanner();
             pathScanner.updateTunnelDimensions(3, 3);
+            pathfinder = new DirectionalPathfinder(pathScanner);
             safetyValidator = new SafetyValidator();
-            backtrackManager = new BacktrackManager();
             rotationController = new RotationController();
             parkourHelper = new ParkourHelper();
         } catch (Exception e) {
@@ -284,40 +336,48 @@ public class AIStashFinder extends Module {
         // Reset state
         currentState = MiningState.CENTERING;
         blocksMined = 0;
+        totalBlocksMined = 0;
         lastPos = mc.player.getPos();
         scanTicks = 0;
+        tickCounter = 0;
         processedChunks.clear();
 
-        info("AIBaseFinder activated at Y=" + Math.round(mc.player.getY()) + ". Starting mining sequence...");
+        info("AIStashFinder activated at Y=" + Math.round(mc.player.getY()));
+        if (debugMode.get()) {
+            info("Debug mode enabled - verbose logging active");
+        }
     }
 
     @Override
     public void onDeactivate() {
         if (mc.options != null) {
-            mc.options.attackKey.setPressed(false);
-            mc.options.forwardKey.setPressed(false);
+            stopMovement();
         }
 
         // Stop centering if active
-        if (centeringHelper != null) {
-            centeringHelper.stopCentering();
-        }
+        centeringHelper.stopCentering();
+
         synchronized (hazardBlocks) {
             hazardBlocks.clear();
+        }
+        synchronized (waypointBlocks) {
+            waypointBlocks.clear();
         }
         currentState = MiningState.IDLE;
         if (safetyValidator != null) {
             safetyValidator.reset();
         }
         if (parkourHelper != null) {
-            parkourHelper.reset(); // ADD THIS LINE
+            parkourHelper.reset();
         }
         processedChunks.clear();
-        info("AIBaseFinder deactivated.");
+
+        long runtime = (System.currentTimeMillis() - moduleStartTime) / 1000;
+        info("AIStashFinder deactivated. Runtime: " + runtime + "s, Blocks mined: " + totalBlocksMined);
     }
 
     @EventHandler
-    private void onChunkData(ChunkDataEvent event) {
+    public void onChunkData(ChunkDataEvent event) {
         // Safety check
         if (mc.player == null || mc.player.getY() > yLevel.get()) return;
 
@@ -370,11 +430,56 @@ public class AIStashFinder extends Module {
     }
 
     @EventHandler
-    private void onTick(TickEvent.Pre event) {
-        // Primary safety check - prevent any operations if above Y level
+    public void onTick(TickEvent.Pre event) {
+        tickCounter++;
+
+        // Check if we should pause for menus
+        if (!workInMenus.get() && mc.currentScreen != null) {
+            // Stop movement when in menus if setting is disabled
+            if (mc.options != null) {
+                stopMovement();
+            }
+            return;
+        }
+
+        // Primary safety check
         if (mc.player == null) {
             toggle();
             return;
+        }
+
+        if (pauseForAutoEat.get()) {
+            AutoEat autoEat = Modules.get().get(AutoEat.class);
+
+            if (autoEat != null && autoEat.isActive()) {
+                // Check if AutoEat is currently eating or should start eating
+                if (autoEat.eating || autoEat.shouldEat()) {
+                    // Pause mining if not already paused
+                    if (!wasPausedForEating) {
+                        wasPausedForEating = true;
+                        stateBeforeEating = currentState; // Save current state
+
+                        // Stop all movement and mining
+                        stopMovement();
+
+                        // Set state to a paused state (you might want to add a PAUSED_EATING state)
+                        currentState = MiningState.IDLE;
+
+                        if (debugMode.get()) {
+                            info("Pausing for AutoEat (hunger/health low)");
+                        }
+                    }
+                    return; // Skip the rest of the tick while eating
+                } else if (wasPausedForEating) {
+                    // AutoEat finished, resume mining
+                    wasPausedForEating = false;
+                    currentState = stateBeforeEating; // Restore previous state
+
+                    if (debugMode.get()) {
+                        info("AutoEat finished, resuming mining");
+                    }
+                }
+            }
         }
 
         // Check Y level every tick for safety
@@ -384,6 +489,28 @@ public class AIStashFinder extends Module {
             return;
         }
 
+
+
+        if (!safetyValidator.canContinue(mc.player, yLevel.get())) {
+            // Check specific reason for failure
+            ItemStack mainHand = mc.player.getMainHandStack();
+            if (mainHand != null && !mainHand.isEmpty()) {
+                double durabilityPercent = SafetyValidator.getToolDurabilityPercent(mainHand);
+                if (durabilityPercent <= 0.10) {
+                    error("Pickaxe durability below 10% (" +
+                        String.format("%.1f%%", durabilityPercent * 100) +
+                        ")! Stopping to prevent tool break.");
+                } else if (mc.player.getHealth() < 10) {
+                    error("Low health! Need to heal before continuing.");
+                } else {
+                    error("Safety check failed - check health and tool durability");
+                }
+            } else {
+                error("No tool in hand!");
+            }
+            toggle();
+            return;
+        }
         // Update settings
         pathScanner.updateScanWidths(scanWidthFalling.get(), scanWidthFluids.get());
         rotationController.updateSettings(
@@ -400,11 +527,10 @@ public class AIStashFinder extends Module {
 
         // Check if we should continue
         if (!safetyValidator.canContinue(mc.player, yLevel.get())) {
-            error("Need full health");
+            error("Safety check failed - need full health or better tool");
             toggle();
             return;
         }
-
 
         // Check for pickaxe
         FindItemResult pickaxe = InvUtils.findInHotbar(this::isTool);
@@ -424,29 +550,497 @@ public class AIStashFinder extends Module {
             return;
         }
 
+        // Debug output every 100 ticks (5 seconds)
+        if (debugMode.get() && tickCounter % 100 == 0) {
+            printDebugInfo();
+        }
+
         // State machine
         try {
             switch (currentState) {
                 case CENTERING -> handleCentering();
-                case SCANNING -> handleScanning();
-                case MINING -> handleMining();
+                case SCANNING_PRIMARY -> handleScanningPrimary();
+                case MINING_PRIMARY -> handleMiningPrimary();
                 case HAZARD_DETECTED -> handleHazardDetected();
-                case RETRACING -> handleRetracing();
-                case BACKTRACKING -> handleBacktracking();
-                case ROTATING -> currentState = MiningState.SCANNING;
-                case STOPPED -> toggle();
+                case CALCULATING_DETOUR -> handleCalculatingDetour();
+                case FOLLOWING_DETOUR -> handleFollowingDetour();
+                case CHANGING_DIRECTION -> handleChangingDirection();
+                case ROTATING -> currentState = MiningState.SCANNING_PRIMARY;
+                case STOPPED -> {
+                    error("All directions blocked - stopping");
+                    toggle();
+                }
             }
         } catch (Exception e) {
             error("Error in state machine: " + e.getMessage());
+            if (debugMode.get()) {
+                e.printStackTrace();
+            }
             toggle();
         }
+    }
+
+    private void handleCentering() {
+        if (!centeringHelper.isCentering()) {
+            if (!centeringHelper.startCentering()) {
+                // Already centered
+                proceedAfterCentering();
+                return;
+            }
+        }
+
+        if (!centeringHelper.tick()) {
+            // Centering complete
+            proceedAfterCentering();
+        }
+    }
+
+    private void proceedAfterCentering() {
+        float yaw = mc.player.getYaw();
+        Direction initialDir = getCardinalDirection(yaw);
+        pathfinder.setInitialDirection(initialDir);
+
+        float targetYaw = directionToYaw(initialDir);
+        final Direction finalDir = initialDir; // Make it final for lambda
+        currentState = MiningState.ROTATING;
+
+        rotationController.startRotation(targetYaw, 0.0f, () -> {
+            currentState = MiningState.SCANNING_PRIMARY;
+            if (debugMode.get()) {
+                info("Initial direction set to " + finalDir.getName() + ", starting mining");
+            }
+        });
+    }
+
+    private void handleScanningPrimary() {
+        BlockPos playerPos = mc.player.getBlockPos();
+        Direction primaryDir = pathfinder.getPrimaryDirection();
+
+        if (debugMode.get()) {
+            System.out.println("DEBUG: Scanning primary direction " + primaryDir.getName());
+        }
+
+        // Check for parkour opportunity
+        if (!parkourHelper.isJumping()) {
+            ParkourHelper.JumpCheck jumpCheck = parkourHelper.checkJumpOpportunity(mc.player, primaryDir);
+            if (jumpCheck.shouldJump) {
+                currentState = MiningState.MINING_PRIMARY;
+                scanTicks = 0;
+                lastPos = mc.player.getPos();
+                startMining();
+                if (debugMode.get()) {
+                    info("Jumping over obstacle: " + jumpCheck.reason);
+                }
+                return;
+            }
+        }
+
+        // Scan ahead
+        PathScanner.ScanResult result = pathScanner.scanDirection(
+            playerPos,
+            primaryDir,
+            scanDepth.get(),
+            scanHeight.get(),
+            strictGroundCheck.get()
+        );
+
+        if (result.isSafe()) {
+            synchronized (hazardBlocks) {
+                hazardBlocks.clear();
+            }
+            currentState = MiningState.MINING_PRIMARY;
+            scanTicks = 0;
+            lastPos = mc.player.getPos();
+            startMining();
+
+            if (debugMode.get()) {
+                System.out.println("DEBUG: Path clear, starting mining");
+            }
+        } else {
+            lastHazardDetected = result;
+            currentState = MiningState.HAZARD_DETECTED;
+
+            if (debugMode.get()) {
+                String hazardName = getHazardName(result.getHazardType());
+                warning(hazardName + " detected at distance " + result.getHazardDistance());
+            }
+        }
+    }
+
+    private void handleMiningPrimary() {
+        // Y-level check
+        if (mc.player.getY() > yLevel.get()) {
+            error("Moved above Y=" + yLevel.get() + " while mining!");
+            stopMovement();
+            toggle();
+            return;
+        }
+
+        Vec3d currentPos = mc.player.getPos();
+        scanTicks++;
+
+        // Check for parkour
+        if (!parkourHelper.isJumping()) {
+            Direction primaryDir = pathfinder.getPrimaryDirection();
+            ParkourHelper.JumpCheck jumpCheck = parkourHelper.checkJumpOpportunity(mc.player, primaryDir);
+
+            if (jumpCheck.shouldJump) {
+                if (debugMode.get()) {
+                    info("Jumping: " + jumpCheck.reason);
+                }
+                if (parkourHelper.startJump(jumpCheck.targetPos)) {
+                    return;
+                }
+            }
+        }
+
+        // Quick scan every SCAN_INTERVAL ticks
+        if (scanTicks >= SCAN_INTERVAL) {
+            scanTicks = 0;
+
+            BlockPos playerPos = mc.player.getBlockPos();
+            Direction primaryDir = pathfinder.getPrimaryDirection();
+
+            PathScanner.ScanResult result = pathScanner.scanDirection(
+                playerPos,
+                primaryDir,
+                scanDepth.get(),
+                scanHeight.get(),
+                false // Non-strict for speed
+            );
+
+            if (!result.isSafe()) {
+                if (debugMode.get()) {
+                    String hazardName = getHazardName(result.getHazardType());
+                    warning(hazardName + " detected at distance " + result.getHazardDistance() + ", stopping");
+                }
+
+                stopMovement();
+                lastHazardDetected = result;
+                currentState = MiningState.HAZARD_DETECTED;
+
+                // Update hazard blocks for rendering
+                if (showHazards.get()) {
+                    synchronized (hazardBlocks) {
+                        hazardBlocks.clear();
+                        hazardBlocks.addAll(result.getHazardPositions());
+                    }
+                }
+                return;
+            }
+        }
+
+        // Track movement
+        double distanceMoved = currentPos.distanceTo(lastPos);
+        if (distanceMoved >= 0.8) {
+            blocksMined++;
+            totalBlocksMined++;
+            lastPos = currentPos;
+
+            if (debugMode.get() && blocksMined % 10 == 0) {
+                System.out.println("DEBUG: Mined " + blocksMined + " blocks in current stretch, " +
+                    totalBlocksMined + " total");
+            }
+        }
+    }
+
+    private void handleHazardDetected() {
+        stopMovement();
+
+        if (debugMode.get()) {
+            System.out.println("\n=== HAZARD DETECTED STATE ===");
+            System.out.println("Hazard type: " + lastHazardDetected.getHazardType());
+            System.out.println("Distance: " + lastHazardDetected.getHazardDistance());
+
+            // Special message for sandwich traps
+            if (lastHazardDetected.getHazardType() == PathScanner.HazardType.SANDWICH_TRAP) {
+                System.out.println("SANDWICH TRAP: Cannot mine or jump - must detour!");
+                warning("Sandwich trap detected - blocks prevent mining and jumping");
+            }
+        }
+
+        currentState = MiningState.CALCULATING_DETOUR;
+    }
+
+    private void handleCalculatingDetour() {
+        if (debugMode.get()) {
+            System.out.println("DEBUG: Calculating best path around hazard");
+        }
+
+        BlockPos playerPos = mc.player.getBlockPos();
+        DirectionalPathfinder.PathPlan plan = pathfinder.calculateDetour(playerPos, lastHazardDetected);
+
+        if (plan.newPrimaryDirection != null) {
+            // Need to change primary direction
+            pendingDirection = plan.newPrimaryDirection;
+            currentState = MiningState.CHANGING_DIRECTION;
+
+            if (debugMode.get()) {
+                warning("Completely blocked! Changing primary direction to " + pendingDirection.getName());
+            }
+        } else if (plan.needsDetour) {
+            // Start following detour
+            currentWaypoint = pathfinder.getNextWaypoint();
+            if (currentWaypoint != null) {
+                currentState = MiningState.FOLLOWING_DETOUR;
+
+                // Update waypoint blocks for rendering using the PEEK method
+                if (debugMode.get() && showWaypoints.get()) {
+                    synchronized (waypointBlocks) {
+                        waypointBlocks.clear();
+                        waypointBlocks.add(currentWaypoint); // Add current
+
+                        // Use peekAllWaypoints to get remaining without consuming
+                        Queue<BlockPos> remainingWaypoints = pathfinder.peekAllWaypoints();
+                        waypointBlocks.addAll(remainingWaypoints);
+                    }
+                }
+
+                if (debugMode.get()) {
+                    info("Starting detour with " + (pathfinder.peekAllWaypoints().size() + 1) + " waypoints");
+                }
+            }
+        } else {
+            // No path possible
+            currentState = MiningState.STOPPED;
+        }
+    }
+
+    private boolean isAtBlockPosition(BlockPos playerPos, BlockPos target) {
+        // Check if player is exactly at the target block position
+        return playerPos.getX() == target.getX() &&
+            playerPos.getY() == target.getY() &&
+            playerPos.getZ() == target.getZ();
+    }
+
+    private boolean isCenteredOnBlock(BlockPos blockPos) {
+        // Check if player is centered on the block (within 0.25 blocks of center)
+        double offsetX = Math.abs(mc.player.getX() - (blockPos.getX() + 0.5));
+        double offsetZ = Math.abs(mc.player.getZ() - (blockPos.getZ() + 0.5));
+        return offsetX <= 0.25 && offsetZ <= 0.25;
+    }
+
+    private void handleFollowingDetour() {
+        // Check if we have a current waypoint
+        if (currentWaypoint == null) {
+            // Get next waypoint
+            currentWaypoint = pathfinder.getNextWaypoint();
+            if (currentWaypoint == null) {
+                // Detour complete
+                pathfinder.completeDetour();
+                currentState = MiningState.SCANNING_PRIMARY;
+
+                synchronized (waypointBlocks) {
+                    waypointBlocks.clear();
+                }
+
+                if (debugMode.get()) {
+                    if (pathfinder.getDebugInfo().contains("Approaching")) {
+                        info("Reached approach point, rescanning for close hazard");
+                    } else {
+                        info("Detour complete, resuming primary direction");
+                    }
+                }
+                return;
+            }
+
+            // Update visual waypoints
+            if (debugMode.get() && showWaypoints.get()) {
+                synchronized (waypointBlocks) {
+                    waypointBlocks.clear();
+                    waypointBlocks.add(currentWaypoint);
+                    waypointBlocks.addAll(pathfinder.peekAllWaypoints());
+                }
+            }
+
+            if (debugMode.get()) {
+                System.out.println("DEBUG: Moving to waypoint: " + currentWaypoint);
+            }
+        }
+
+        BlockPos playerPos = mc.player.getBlockPos();
+
+
+        // Check for parkour opportunities
+        if (!parkourHelper.isJumping()) {
+            Direction dirToWaypoint = getDirectionToward(playerPos, currentWaypoint);
+            if (dirToWaypoint != null) {
+                ParkourHelper.JumpCheck jumpCheck = parkourHelper.checkJumpOpportunity(mc.player, dirToWaypoint);
+                if (jumpCheck.shouldJump) {
+                    if (debugMode.get()) {
+                        info("Jumping during detour: " + jumpCheck.reason);
+                    }
+                    if (parkourHelper.startJump(jumpCheck.targetPos)) {
+                        // Continue mining while jumping
+                        startMining();
+                        return;
+                    }
+                }
+            }
+        }
+
+        // Check if we've reached the waypoint block position
+        double distanceToWaypoint = Math.sqrt(
+            Math.pow(playerPos.getX() - currentWaypoint.getX(), 2) +
+                Math.pow(playerPos.getZ() - currentWaypoint.getZ(), 2)
+        );
+
+        if (distanceToWaypoint < 0.5) {
+            // We're at or very close to the waypoint
+            if (debugMode.get()) {
+                System.out.println("DEBUG: Reached waypoint " + currentWaypoint);
+            }
+            currentWaypoint = null; // Move to next waypoint
+            return;
+        }
+
+        // Calculate direction to waypoint
+        Direction dirToWaypoint = getDirectionToward(playerPos, currentWaypoint);
+        if (dirToWaypoint == null) {
+            // Can't determine direction (might be diagonal or on different Y)
+            // Try to get closer by mining in general direction
+            int dx = currentWaypoint.getX() - playerPos.getX();
+            int dz = currentWaypoint.getZ() - playerPos.getZ();
+
+            if (Math.abs(dx) > Math.abs(dz)) {
+                dirToWaypoint = dx > 0 ? Direction.EAST : Direction.WEST;
+            } else if (dz != 0) {
+                dirToWaypoint = dz > 0 ? Direction.SOUTH : Direction.NORTH;
+            } else {
+                // We're close enough, move to next waypoint
+                currentWaypoint = null;
+                return;
+            }
+        }
+
+        // Check if we need to rotate
+        float currentYaw = mc.player.getYaw();
+        float targetYaw = directionToYaw(dirToWaypoint);
+        float yawDiff = Math.abs(MathHelper.wrapDegrees(currentYaw - targetYaw));
+
+        if (yawDiff > 15) {
+            // Need to rotate
+            stopMovement();
+
+            currentState = MiningState.ROTATING;
+            rotationController.startRotation(targetYaw, 0.0f, () -> {
+                currentState = MiningState.FOLLOWING_DETOUR;
+            });
+            return;
+        }
+
+        // Mine toward waypoint
+        startMining();
+
+        // Update last position for movement tracking
+        lastPos = mc.player.getPos();
+
+        // Safety scan while following waypoint
+        scanTicks++;
+        if (scanTicks >= 20) { // Check every second
+            scanTicks = 0;
+
+            PathScanner.ScanResult quickScan = pathScanner.scanDirection(
+                playerPos, dirToWaypoint, 3, 4, false
+            );
+
+            if (!quickScan.isSafe() && quickScan.getHazardDistance() <= 2) {
+                // Immediate danger while following waypoint!
+                if (debugMode.get()) {
+                    warning("Hazard detected while following detour! Type: " + quickScan.getHazardType());
+                }
+
+                // Stop and recalculate
+                stopMovement();
+
+                // Clear current detour and recalculate
+                currentWaypoint = null;
+                pathfinder.completeDetour();
+                lastHazardDetected = quickScan;
+                currentState = MiningState.CALCULATING_DETOUR;
+            }
+        }
+    }
+
+    private void handleChangingDirection() {
+        if (pendingDirection == null) {
+            currentState = MiningState.STOPPED;
+            return;
+        }
+
+        // First, center before rotating to new direction
+        if (!centeringHelper.isCentering()) {
+            // Check if we need to center
+            if (!isCenteredOnBlock(mc.player.getBlockPos())) {
+                if (debugMode.get()) {
+                    info("Centering before changing direction to " + pendingDirection.getName());
+                }
+
+                if (centeringHelper.startCentering()) {
+                    // Started centering, stay in this state
+                    return;
+                }
+            }
+        } else {
+            // Currently centering, check if done
+            if (!centeringHelper.tick()) {
+                // Centering complete, now we can rotate
+                if (debugMode.get()) {
+                    info("Centering complete, now rotating to " + pendingDirection.getName());
+                }
+            } else {
+                // Still centering
+                return;
+            }
+        }
+
+        // We're centered, now perform the rotation
+        float targetYaw = directionToYaw(pendingDirection);
+        currentState = MiningState.ROTATING;
+
+        rotationController.startRotation(targetYaw, 0.0f, () -> {
+            pathfinder.setInitialDirection(pendingDirection);
+            currentState = MiningState.SCANNING_PRIMARY;
+            pendingDirection = null;
+
+            if (debugMode.get()) {
+                info("Direction change complete, now mining " + pathfinder.getPrimaryDirection().getName());
+            }
+        });
+    }
+
+    private Direction getDirectionToward(BlockPos from, BlockPos to) {
+        int dx = to.getX() - from.getX();
+        int dz = to.getZ() - from.getZ();
+
+        // Only return cardinal directions, ignore Y differences
+        // Choose the direction with greater absolute difference
+        if (Math.abs(dx) > Math.abs(dz)) {
+            return dx > 0 ? Direction.EAST : Direction.WEST;
+        } else if (Math.abs(dz) > Math.abs(dx)) {
+            return dz > 0 ? Direction.SOUTH : Direction.NORTH;
+        } else if (dx != 0) {
+            // Equal distance, prefer X axis
+            return dx > 0 ? Direction.EAST : Direction.WEST;
+        } else if (dz != 0) {
+            return dz > 0 ? Direction.SOUTH : Direction.NORTH;
+        }
+
+        return null; // Same position horizontally
+    }
+
+    private void printDebugInfo() {
+        System.out.println("\n=== DEBUG INFO (Tick " + tickCounter + ") ===");
+        System.out.println("State: " + currentState);
+        System.out.println("Blocks mined: " + totalBlocksMined);
+        System.out.println("Position: " + mc.player.getBlockPos());
+        System.out.println(pathfinder.getDebugInfo());
     }
 
     private void disconnectAndNotify(StashChunk chunk, String type) {
         // Stop all actions
         if (mc.options != null) {
-            mc.options.attackKey.setPressed(false);
-            mc.options.forwardKey.setPressed(false);
+            stopMovement();
         }
 
         // Create disconnect message
@@ -473,321 +1067,23 @@ public class AIStashFinder extends Module {
         return itemStack.getItem() instanceof MiningToolItem || itemStack.getItem() instanceof ShearsItem;
     }
 
-    private void handleCentering() {
-        if (!centeringHelper.isCentering()) {
-            if (!centeringHelper.startCentering()) {
-                // Already centered
-                proceedAfterCentering();
-                return;
-            }
-        }
-
-        if (!centeringHelper.tick()) {
-            // Centering complete
-            proceedAfterCentering();
-        }
-    }
-
-    private void proceedAfterCentering() {
-        float yaw = mc.player.getYaw();
-        Direction initialDir = getCardinalDirection(yaw);
-        directionManager.setInitialDirection(initialDir);
-
-        float targetYaw = directionToYaw(initialDir);
-        currentState = MiningState.ROTATING;
-
-        // UPDATED: Added 0.0f for pitch
-        rotationController.startRotation(targetYaw, 0.0f, () -> {
-            backtrackManager.startNewSegment(initialDir, mc.player.getPos());
-            currentState = MiningState.SCANNING;
-        });
-    }
-
-    private void handleScanning() {
-        BlockPos playerPos = mc.player.getBlockPos();
-        Direction currentDir = directionManager.getCurrentDirection();
-        if (!parkourHelper.isJumping()) {
-            ParkourHelper.JumpCheck jumpCheck = parkourHelper.checkJumpOpportunity(mc.player, currentDir);
-
-            if (jumpCheck.shouldJump) {
-                // We can jump, so start mining and let handleMining deal with the jump
-                currentState = MiningState.MINING;
-                blocksMined = 0;
-                scanTicks = 0;
-                lastPos = mc.player.getPos();
-                mc.options.attackKey.setPressed(true);
-                mc.options.forwardKey.setPressed(true);
-                return;
-            }
-        }
-        PathScanner.ScanResult result = pathScanner.scanDirection(
-            playerPos,
-            currentDir,
-            scanDepth.get(),
-            scanHeight.get(),
-            strictGroundCheck.get()
-        );
-
-        if (result.isSafe()) {
-            synchronized (hazardBlocks) {
-                hazardBlocks.clear();
-            }
-            currentState = MiningState.MINING;
-            blocksMined = 0;
-            scanTicks = 0;
-            lastPos = mc.player.getPos();
-            mc.options.attackKey.setPressed(true);
-            mc.options.forwardKey.setPressed(true);
-        } else {
-            if (showHazards.get()) {
-                synchronized (hazardBlocks) {
-                    hazardBlocks.clear();
-                    hazardBlocks.addAll(result.getHazardPositions());
-                }
-            }
-            String hazardName = getHazardName(result.getHazardType());
-            warning(hazardName + " detected, changing direction");
-            currentState = MiningState.HAZARD_DETECTED;
-        }
-    }
-
-    private void handleMining() {
-        // Additional Y-level check during mining
-        if (mc.player.getY() > yLevel.get()) {
-            error("Moved above Y=" + yLevel.get() + " while mining! Stopping.");
-            mc.options.attackKey.setPressed(false);
-            mc.options.forwardKey.setPressed(false);
-            toggle();
-            return;
-        }
-
-        Vec3d currentPos = mc.player.getPos();
-        scanTicks++;
-
-        if (!parkourHelper.isJumping()) {
-            Direction currentDir = directionManager.getCurrentDirection();
-            ParkourHelper.JumpCheck jumpCheck = parkourHelper.checkJumpOpportunity(mc.player, currentDir);
-
-            if (jumpCheck.shouldJump) {
-                info("Jumping over obstacle: " + jumpCheck.reason);
-                // Don't stop mining keys, just initiate jump
-                if (parkourHelper.startJump(jumpCheck.targetPos)) {
-                    // Continue mining after jump
-                    return;
-                }
-            }
-        }
-        if (scanTicks >= scanFrequency.get()) {
-            scanTicks = 0;
-
-            BlockPos playerPos = mc.player.getBlockPos();
-            Direction currentDir = directionManager.getCurrentDirection();
-
-            PathScanner.ScanResult result = pathScanner.scanDirection(
-                playerPos,
-                currentDir,
-                scanDepth.get(),
-                scanHeight.get(),
-                strictGroundCheck.get()
-            );
-
-            if (!result.isSafe() && result.getHazardDistance() <= safetyMargin.get()) {
-                if (showHazards.get()) {
-                    synchronized (hazardBlocks) {
-                        hazardBlocks.clear();
-                        hazardBlocks.addAll(result.getHazardPositions());
-                    }
-                }
-                String hazardName = getHazardName(result.getHazardType());
-                warning(hazardName + " detected, changing direction");
-                mc.options.attackKey.setPressed(false);
-                mc.options.forwardKey.setPressed(false);
-                currentState = MiningState.HAZARD_DETECTED;
-                return;
-            }
-        }
-
-        double distanceMoved = currentPos.distanceTo(lastPos);
-        if (distanceMoved >= 0.8) {
-            blocksMined++;
-            lastPos = currentPos;
-
-            directionManager.recordMovement(1);
-            backtrackManager.recordMovement();
-        }
-
-        if (blocksMined >= 3) {
-            mc.options.attackKey.setPressed(false);
-            mc.options.forwardKey.setPressed(false);
-
-            BlockPos playerPos = mc.player.getBlockPos();
-            Direction currentDir = directionManager.getCurrentDirection();
-
-            PathScanner.ScanResult result = pathScanner.scanDirection(
-                playerPos,
-                currentDir,
-                scanDepth.get(),
-                scanHeight.get(),
-                strictGroundCheck.get()
-            );
-
-            if (!result.isSafe() && result.getHazardDistance() <= safetyMargin.get()) {
-                String hazardName = getHazardName(result.getHazardType());
-                warning(hazardName + " detected, changing direction");
-                currentState = MiningState.HAZARD_DETECTED;
-                return;
-            }
-
-            blocksMined = 0;
-            scanTicks = 0;
-            mc.options.attackKey.setPressed(true);
-            mc.options.forwardKey.setPressed(true);
-        }
-    }
-
-    private void handleHazardDetected() {
-        mc.options.attackKey.setPressed(false);
-        mc.options.forwardKey.setPressed(false);
-
-        BlockPos currentBlock = mc.player.getBlockPos();
-        double offsetX = Math.abs(mc.player.getX() - (currentBlock.getX() + 0.5));
-        double offsetZ = Math.abs(mc.player.getZ() - (currentBlock.getZ() + 0.5));
-
-        if (offsetX > 0.15 || offsetZ > 0.15) {
-            // Not centered, switch to centering state
-            centeringForHazard = true;
-            currentState = MiningState.CENTERING;
-            return;
-        }
-
-
-        Direction currentDir = directionManager.getCurrentDirection();
-        directionManager.recordHazard(currentDir, 0);
-
-        DirectionManager.DirectionChoice choice = directionManager.getNextDirection();
-
-        if (choice.needsBacktrack) {
-            Direction mainTunnel = directionManager.getMainTunnel();
-            currentBacktrackPlan = backtrackManager.createBacktrackPlan(mainTunnel, backtrackDistance.get());
-
-            info("Backtracking and trying again");
-
-            if (currentBacktrackPlan.needsRetrace) {
-                // Start retrace
-                float targetYaw = directionToYaw(currentBacktrackPlan.retraceDirection);
-                currentState = MiningState.ROTATING;
-
-                rotationController.startRotation(targetYaw, 0.0f, () -> {
-                    synchronized (hazardBlocks) {
-                        hazardBlocks.clear();
-                    }
-                    currentState = MiningState.RETRACING;
-                    backtrackManager.startRetrace(currentBacktrackPlan.retraceDistance);
-                    lastPos = mc.player.getPos();
-                    mc.options.forwardKey.setPressed(true);
-                });
-            } else {
-                // Direct backtrack
-                startBacktrack();
-            }
-            return;
-        }
-
-        if (choice.direction == null) {
-            error("No safe directions found!");
-            currentState = MiningState.STOPPED;
-            return;
-        }
-
-        pendingDirection = choice.direction;
-
-        float targetYaw = directionToYaw(choice.direction);
-        currentState = MiningState.ROTATING;
-
-        rotationController.startRotation(targetYaw, 0.0f, () -> {
-            backtrackManager.startNewSegment(pendingDirection, mc.player.getPos());
-            currentState = MiningState.SCANNING;
-        });
-    }
-
-    private void handleRetracing() {
-        Vec3d currentPos = mc.player.getPos();
-        double distanceMoved = currentPos.distanceTo(lastPos);
-
-        if (distanceMoved >= 0.8) {
-            lastPos = currentPos;
-
-            if (backtrackManager.updateRetrace()) {
-                // Retrace complete, start backtrack
-                mc.options.forwardKey.setPressed(false);
-                startBacktrack();
-            }
-        }
-    }
-
-    private void startBacktrack() {
-        float targetYaw = directionToYaw(currentBacktrackPlan.backtrackDirection);
-        currentState = MiningState.ROTATING;
-
-        // UPDATED: Added 0.0f for pitch
-        rotationController.startRotation(targetYaw, 0.0f, () -> {
-            currentState = MiningState.BACKTRACKING;
-            backtrackManager.startBacktrack(currentBacktrackPlan.backtrackDistance);
-            lastPos = mc.player.getPos();
-            mc.options.forwardKey.setPressed(true);
-        });
-    }
-
-    private void handleBacktracking() {
-        Vec3d currentPos = mc.player.getPos();
-        double distanceMoved = currentPos.distanceTo(lastPos);
-
-        if (distanceMoved >= 0.8) {
-            lastPos = currentPos;
-
-            if (backtrackManager.updateBacktrack()) {
-                // Backtrack complete
-                mc.options.forwardKey.setPressed(false);
-
-                backtrackManager.reset();
-                directionManager.markBacktrackComplete();
-
-                // Get new direction
-                DirectionManager.DirectionChoice choice = directionManager.getNextDirection();
-
-                if (choice.direction == null) {
-                    error("No safe directions found after backtracking!");
-                    currentState = MiningState.STOPPED;
-                    return;
-                }
-
-                pendingDirection = choice.direction;
-
-                float targetYaw = directionToYaw(choice.direction);
-                currentState = MiningState.ROTATING;
-
-                rotationController.startRotation(targetYaw, 0.0f, () -> {
-                    backtrackManager.startNewSegment(pendingDirection, mc.player.getPos());
-                    currentState = MiningState.SCANNING;
-                });
-            }
-        }
-    }
-
     private String getHazardName(PathScanner.HazardType type) {
         return switch (type) {
             case LAVA -> "Lava";
             case WATER -> "Water";
-            case FALLING_BLOCK -> "Gravel";
+            case FALLING_BLOCK -> "Gravel/Sand";
             case UNSAFE_GROUND -> "Unsafe ground";
             case DANGEROUS_BLOCK -> "Dangerous block";
-            default -> "Hazard";
+            case SANDWICH_TRAP -> "Sandwich trap (blocked mining)";  // NEW
+            default -> "Unknown hazard";
         };
     }
 
     private Direction getCardinalDirection(float yaw) {
+        // Normalize yaw to 0-360 range
         yaw = (yaw % 360 + 360) % 360;
 
+        // Only return cardinal directions, never UP or DOWN
         if (yaw >= 315 || yaw < 45) return Direction.SOUTH;
         if (yaw >= 45 && yaw < 135) return Direction.WEST;
         if (yaw >= 135 && yaw < 225) return Direction.NORTH;
