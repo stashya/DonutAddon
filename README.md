@@ -1,7 +1,7 @@
 <h1 align="center">Donut Addon</h1>
 
 [![Join the discord](https://img.shields.io/discord/1385871492826534008?logo=discord&label=Join%20the%20Discord%21)](https://discord.gg/Ar5Hpf5d5p)
-[![.github/workflows/build.yml](https://github.com/Powie69/DonutAddon/actions/workflows/build.yml/badge.svg)](https://github.com/stashya/DonutAddon/actions/workflows/build.yml)
+[![.github/workflows/build.yml](https://github.com/stashya/DonutAddon/actions/workflows/build.yml/badge.svg)](https://github.com/stashya/DonutAddon/actions/workflows/build.yml)
 
 A powerful addon for Meteor Client featuring advanced mining automation and enhanced ESP modules.
 
