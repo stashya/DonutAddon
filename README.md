@@ -24,11 +24,10 @@ A powerful addon for Meteor Client featuring advanced mining automation and enha
 - Minecraft 1.21.4 (or your version)
 - Fabric Loader
 - Meteor Client
-- Baritone (for AI StashFinder)
 
 ## Installation
 
-1. Download the latest release from the [Releases](https://github.com/stashya/Donutaddon/) page
+1. Download the latest release from the [Releases](https://github.com/stashya/Donutaddon/releases) page
 2. Place the `.jar` file in your `.minecraft/mods` folder
 3. Ensure you have Meteor Client and Baritone installed
 
