@@ -27,7 +27,7 @@ A powerful addon for Meteor Client featuring advanced mining automation and enha
 
 ## Installation
 
-1. Download the latest release from the [Releases](https://github.com/stashya/Donutaddon/releases) page
+1. Download the latest release from the [Releases](https://github.com/stashya/DonutAddon/tags) page
 2. Place the `.jar` file in your `.minecraft/mods` folder
 3. Ensure you have Meteor Client and Baritone installed
 
