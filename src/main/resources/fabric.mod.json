@@ -28,7 +28,7 @@
     "modmenu": {
       "issues": "https://github.com/stashya/DonutAddon/issues",
       "links": {
-        "modmenu.github_releases": "https://github.com/stashya/DonutAddon/releases",
+        "modmenu.github_releases": "https://github.com/stashya/DonutAddon/releases"
       },
       "source": "https://github.com/stashya/DonutAddon",
       "website": "https://github.com/stashya/DonutAddon"

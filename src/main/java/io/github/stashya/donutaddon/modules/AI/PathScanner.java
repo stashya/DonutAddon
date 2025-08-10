@@ -88,38 +88,6 @@ public class PathScanner {
             }
 
             // For the very first block (forwardDist == 1), also accept if 2 blocks down is solid
-            if (forwardDist == 1) {
-                BlockPos twoDown = groundPos.down(2);
-                BlockState twoDownState = world.getBlockState(twoDown);
-                if (canWalkOn(world, twoDown, twoDownState)) {
-                    return true;
-                }
-            }
-        }
-
-        return false;
-    }
-
-    private boolean isWalkablePath(World world, BlockPos groundPos, int forwardDist) {
-        BlockState groundState = world.getBlockState(groundPos);
-
-        // Direct ground is solid - good to walk
-        if (canWalkOn(world, groundPos, groundState)) {
-            return true;
-        }
-
-        // If air at expected ground level, check for 1-block drop
-        if (groundState.isAir()) {
-            // Check 1 block down
-            BlockPos oneDown = groundPos.down();
-            BlockState oneDownState = world.getBlockState(oneDown);
-
-            if (canWalkOn(world, oneDown, oneDownState)) {
-                // Safe 1-block drop
-                return true;
-            }
-
-            // For the very first block (forwardDist == 1), also accept if 2 blocks down is solid
             // This handles the edge case where we're looking at the air space of a drop
             if (forwardDist == 1) {
                 BlockPos twoDown = groundPos.down(2);
