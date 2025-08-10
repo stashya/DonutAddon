@@ -2,7 +2,7 @@ name: Build jar
 on: [push, pull_request]
 
 concurrency:
-  group: `${{ github.workflow }}-${{ github.event.pull_request.number || github.ref_name || github.sha }}`
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref_name || github.sha }}
   cancel-in-progress: true
 
 jobs:
@@ -14,7 +14,6 @@ jobs:
         uses: actions/checkout@v4
         with:
             persist-credentials: false
-
 
       - name: Set up Gradle
         uses: gradle/actions/setup-gradle@v4

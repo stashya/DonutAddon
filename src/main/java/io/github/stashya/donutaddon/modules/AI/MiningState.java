@@ -1,0 +1,15 @@
+package io.github.stashya.donutaddon.modules.AI;
+
+public enum MiningState {
+    IDLE,
+    CENTERING,
+    CENTERING_AT_WAYPOINT,  // ADD THIS NEW STATE
+    SCANNING_PRIMARY,
+    MINING_PRIMARY,
+    HAZARD_DETECTED,
+    CALCULATING_DETOUR,
+    FOLLOWING_DETOUR,
+    ROTATING,
+    CHANGING_DIRECTION,
+    STOPPED
+}

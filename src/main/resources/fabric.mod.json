@@ -5,22 +5,34 @@
   "name": "Donut Addon",
   "description": "Addon for Donut Smp",
   "authors": [
-    "StashFinder"
+    "StashFinder",
+    "Powie69"
   ],
   "contact": {
+    "homepage": "https://github.com/stashya/DonutAddon",
+    "issues": "https://github.com/stashya/DonutAddon/issues",
+    "repo": "https://github.com/stashya/DonutAddon",
     "sources": "https://github.com/stashya/DonutAddon"
   },
-  "icon": "assets/template/icon.png",
+  "icon": "./assets/donutAddon/icon.png",
   "environment": "client",
   "entrypoints": {
     "meteor": [
-      "com.DonutAddon.addon.DonutAddon"
+      "io.github.stashya.donutaddon.DonutAddon"
     ]
   },
   "mixins": [
     "donutaddon.json"
   ],
   "custom": {
+    "modmenu": {
+      "issues": "https://github.com/stashya/DonutAddon/issues",
+      "links": {
+        "modmenu.github_releases": "https://github.com/stashya/DonutAddon/releases",
+      },
+      "source": "https://github.com/stashya/DonutAddon",
+      "website": "https://github.com/stashya/DonutAddon"
+    },
     "meteor-client:color": "225,25,25"
   },
   "depends": {
