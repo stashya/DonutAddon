@@ -11,6 +11,11 @@ public class DirectionalPathfinder {
     private boolean isDetouring = false;
     private final PathScanner pathScanner;
 
+    // Configuration constants
+    private static final int APPROACH_STOP_DISTANCE = 7; // Stop this many blocks before distant hazards
+    private static final int DETOUR_START_BUFFER = 5;    // Start detour this many blocks before hazard (was 2)
+    private static final int DETOUR_SIDE_CLEARANCE = 2;  // Extra clearance when going around
+
     // Debug tracking
     private int detourCount = 0;
     private int directionChangeCount = 0;
@@ -19,6 +24,9 @@ public class DirectionalPathfinder {
     public DirectionalPathfinder(PathScanner scanner) {
         this.pathScanner = scanner;
         System.out.println("=== DirectionalPathfinder Initialized ===");
+        System.out.println("Detour start buffer: " + DETOUR_START_BUFFER + " blocks");
+        System.out.println("Side clearance: " + DETOUR_SIDE_CLEARANCE + " blocks");
+        System.out.println("Approach stop distance: " + APPROACH_STOP_DISTANCE + " blocks");
     }
 
     public void setInitialDirection(Direction dir) {
@@ -168,12 +176,13 @@ public class DirectionalPathfinder {
 
         String sideName = goLeft ? "LEFT" : "RIGHT";
         System.out.println("\nDEBUG: Building minimal " + sideName + " detour");
+        System.out.println("Starting detour " + DETOUR_START_BUFFER + " blocks before hazard");
 
         // Calculate minimal side distance needed
-        int sideDistance = (bounds.width / 2) + 2; // Just enough to clear hazard + safety
+        int sideDistance = (bounds.width / 2) + DETOUR_SIDE_CLEARANCE;
 
-        // Try increasingly aggressive paths until one works
-        for (int attempt = 0; attempt < 6; attempt++) {
+        // Try increasingly wider paths if needed
+        for (int attempt = 0; attempt < 3; attempt++) {
             List<BlockPos> path = tryDetourPath(playerPos, bounds, sideDir, sideDistance + attempt);
             if (path != null) {
                 System.out.println("SUCCESS: Found " + sideName + " path with " + path.size() + " waypoints");
@@ -188,20 +197,21 @@ public class DirectionalPathfinder {
         List<BlockPos> waypoints = new ArrayList<>();
 
         // Calculate key positions
-        int approachDistance = Math.max(bounds.startDistance - 2, 1);
+        // Start detour DETOUR_START_BUFFER blocks before hazard (gives more room)
+        int approachDistance = Math.max(bounds.startDistance - DETOUR_START_BUFFER, 1);
         int forwardPastHazard = bounds.depth + 3;
 
-        // Waypoint 1: Turn point (get close to hazard before turning)
+        // Waypoint 1: Turn point (now further from hazard)
         BlockPos turnPoint = playerPos.offset(primaryDirection, approachDistance);
-        turnPoint = adjustToGroundLevel(turnPoint); // Adjust to actual ground level
+        turnPoint = adjustToGroundLevel(turnPoint);
         if (!validateSegment(playerPos, turnPoint, primaryDirection, approachDistance)) {
             return null;
         }
         waypoints.add(turnPoint);
 
-        // Waypoint 2: Side position (move sideways to clear hazard)
+        // Waypoint 2: Side position (with extra clearance)
         BlockPos sidePoint = turnPoint.offset(sideDir, sideDistance);
-        sidePoint = adjustToGroundLevel(sidePoint); // Adjust to actual ground level
+        sidePoint = adjustToGroundLevel(sidePoint);
         if (!validateSegment(turnPoint, sidePoint, sideDir, sideDistance)) {
             return null;
         }
@@ -209,7 +219,7 @@ public class DirectionalPathfinder {
 
         // Waypoint 3: Forward past hazard (continue in primary direction)
         BlockPos pastHazard = sidePoint.offset(primaryDirection, forwardPastHazard);
-        pastHazard = adjustToGroundLevel(pastHazard); // Adjust to actual ground level
+        pastHazard = adjustToGroundLevel(pastHazard);
         if (!validateSegment(sidePoint, pastHazard, primaryDirection, forwardPastHazard)) {
             return null;
         }
@@ -470,9 +480,10 @@ public class DirectionalPathfinder {
         Direction opposite = primaryDirection.getOpposite();
         System.out.println("NOT checking " + opposite.getName() + " (that's where we came from)");
         System.out.println("ERROR: No valid forward paths - all perpendicular directions blocked!");
-        System.out.println("Stopping to avoid going backwards into mined tunnel.");
 
-        return new PathPlan(false, new LinkedList<>(), "Dead end - refusing to go backwards");
+        // NEW: Return null direction to signal that RTP might be needed
+        // The main module will check if RTP is enabled and handle accordingly
+        return new PathPlan((Direction)null, "No valid paths - RTP recovery needed");
     }
 
     public void completeDetour() {
@@ -487,10 +498,15 @@ public class DirectionalPathfinder {
     }
 
     public String getDebugInfo() {
+        // Handle case where pathfinder isn't initialized yet (during RTP/mining down)
+        if (primaryDirection == null) {
+            return "Primary: NOT SET | Pathfinder not initialized";
+        }
+
         return String.format(
             "Primary: %s (original: %s) | Detouring: %s | Detours: %d | Changes: %d | Reason: %s",
             primaryDirection.getName(),
-            originalPrimaryDirection.getName(),
+            originalPrimaryDirection != null ? originalPrimaryDirection.getName() : "NOT SET",
             isDetouring,
             detourCount,
             directionChangeCount,

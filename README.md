@@ -4,7 +4,7 @@ A powerful addon for Meteor Client featuring advanced mining automation and enha
 
 ## Features
 
-- **AI StashFinder**: Automated base mining below Y=-30 with intelligent pathfinding
+- **BStar**: Automated base mining with intelligent pathfinding
 - **Advanced ESP Modules**:
     - Cluster Finder
     - Deepslate ESP (2 variants)
@@ -24,7 +24,6 @@ A powerful addon for Meteor Client featuring advanced mining automation and enha
 - Minecraft 1.21.4 (or your version)
 - Fabric Loader
 - Meteor Client
-- Baritone (for AI StashFinder)
 
 ## Installation
 

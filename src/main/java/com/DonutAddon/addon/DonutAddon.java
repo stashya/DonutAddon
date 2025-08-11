@@ -36,7 +36,7 @@ public class DonutAddon extends MeteorAddon {
         Modules.get().add(new CoveredHole());
         Modules.get().add(new PillagerESP());
         Modules.get().add(new WanderingTraderESP());
-        Modules.get().add(new AIStashFinder());
+        Modules.get().add(new BStar());
 
         // HUD
         Hud.get().register(MeteorImageHud.INFO);

@@ -14,9 +14,18 @@ public class SafetyValidator {
     private Vec3d lastPosition;
     private int stuckTicks = 0;
     private int jumpCooldown = 0;
-    private static final int STUCK_THRESHOLD = 140; // 7 seconds * 20 ticks
-    private static final int JUMP_COOLDOWN_TICKS = 40; // 2 seconds between auto-jumps
-    private static final double MIN_DURABILITY_PERCENT = 0.10; // 10% minimum durability
+    private int unstuckAttempts = 0;  // NEW: Track recovery attempts
+    private boolean needsModuleReset = false;  // NEW: Flag for module reset
+
+    // Adjusted thresholds for faster response
+    private static final int STUCK_THRESHOLD = 140; // Reduced from 140 to 60 ticks (3 seconds)
+    private static final int JUMP_COOLDOWN_TICKS = 40; // Reduced from 40 to 20 ticks (1 second)
+    private static final double MIN_DURABILITY_PERCENT = 0.10;
+    private static final double MOVEMENT_THRESHOLD = 0.01; // More sensitive stuck detection
+
+    // NEW: Track position history for better stuck detection
+    private Vec3d positionHistory[] = new Vec3d[20]; // Track last second of positions
+    private int historyIndex = 0;
 
     public boolean canContinue(PlayerEntity player, int maxY) {
         // Check Y level
@@ -66,13 +75,13 @@ public class SafetyValidator {
             return false;
         }
 
-        // Check tool durability (UPDATED to percentage-based)
+        // Check tool durability
         ItemStack mainHand = player.getMainHandStack();
         if (isMiningTool(mainHand)) {
             int currentDamage = mainHand.getDamage();
             int maxDamage = mainHand.getMaxDamage();
 
-            if (maxDamage > 0) { // Ensure the item has durability
+            if (maxDamage > 0) {
                 int remainingDurability = maxDamage - currentDamage;
                 double durabilityPercent = (double) remainingDurability / maxDamage;
 
@@ -83,7 +92,6 @@ public class SafetyValidator {
                     return false;
                 }
 
-                // Optional: Warn when getting close to the threshold
                 if (durabilityPercent <= 0.15 && durabilityPercent > MIN_DURABILITY_PERCENT) {
                     System.out.println("CAUTION: Tool durability at " +
                         String.format("%.1f%%", durabilityPercent * 100) +
@@ -91,7 +99,6 @@ public class SafetyValidator {
                 }
             }
         } else {
-            // No valid mining tool in hand
             System.out.println("WARNING: No mining tool in main hand!");
             return false;
         }
@@ -106,55 +113,122 @@ public class SafetyValidator {
             itemStack.getItem() instanceof PickaxeItem;
     }
 
-    public void checkAndHandleStuck(PlayerEntity player) {
+    /**
+     * Enhanced stuck detection with two-attempt recovery system
+     * @return StuckRecoveryAction indicating what the module should do
+     */
+    public StuckRecoveryAction checkAndHandleStuck(PlayerEntity player) {
         if (jumpCooldown > 0) {
             jumpCooldown--;
         }
 
         Vec3d currentPos = new Vec3d(player.getX(), player.getY(), player.getZ());
 
+        // Update position history
+        positionHistory[historyIndex] = currentPos;
+        historyIndex = (historyIndex + 1) % positionHistory.length;
+
         if (lastPosition == null) {
             lastPosition = currentPos;
-            return;
+            return StuckRecoveryAction.NONE;
         }
 
-        // Check if position hasn't changed (ignoring Y for jumping)
+        // Check horizontal movement (more sensitive)
         double horizontalDistance = Math.sqrt(
             Math.pow(currentPos.x - lastPosition.x, 2) +
                 Math.pow(currentPos.z - lastPosition.z, 2)
         );
 
-        if (horizontalDistance < 0.1) {
+        // Also check against position from 1 second ago for better stuck detection
+        Vec3d oldPos = positionHistory[(historyIndex + 1) % positionHistory.length];
+        double longerTermMovement = 0;
+        if (oldPos != null) {
+            longerTermMovement = Math.sqrt(
+                Math.pow(currentPos.x - oldPos.x, 2) +
+                    Math.pow(currentPos.z - oldPos.z, 2)
+            );
+        }
+
+        // Consider stuck if both short-term and long-term movement are minimal
+        boolean isStuck = horizontalDistance < MOVEMENT_THRESHOLD &&
+            (oldPos == null || longerTermMovement < 0.5);
+
+        if (isStuck) {
             stuckTicks++;
 
-            if (stuckTicks >= STUCK_THRESHOLD && jumpCooldown <= 0 && player.isOnGround()) {
-                // Auto-jump to try to get unstuck
-                player.jump();
-                jumpCooldown = JUMP_COOLDOWN_TICKS;
-                stuckTicks = 0; // Reset stuck counter after jump
+            System.out.println("STUCK DETECTION: Ticks=" + stuckTicks +
+                ", Attempts=" + unstuckAttempts +
+                ", Movement=" + String.format("%.3f", horizontalDistance));
+
+            if (stuckTicks >= STUCK_THRESHOLD && jumpCooldown <= 0) {
+                unstuckAttempts++;
+
+                if (unstuckAttempts == 1) {
+                    // FIRST ATTEMPT: Just jump
+                    System.out.println("=== STUCK RECOVERY: ATTEMPT 1 - JUMPING ===");
+                    if (player.isOnGround()) {
+                        player.jump();
+                        jumpCooldown = JUMP_COOLDOWN_TICKS;
+                        stuckTicks = 0; // Reset counter after jump
+                        return StuckRecoveryAction.JUMPED;
+                    }
+                } else if (unstuckAttempts >= 2) {
+                    // SECOND ATTEMPT: Request module reset
+                    System.out.println("=== STUCK RECOVERY: ATTEMPT 2 - REQUESTING MODULE RESET ===");
+                    System.out.println("Jump didn't work, need to recalculate path");
+                    needsModuleReset = true;
+                    stuckTicks = 0;
+                    jumpCooldown = JUMP_COOLDOWN_TICKS * 2; // Longer cooldown after reset
+                    return StuckRecoveryAction.NEEDS_RESET;
+                }
             }
         } else {
-            // Player moved, reset counter
+            // Player moved successfully
+            if (stuckTicks > 0) {
+                System.out.println("Movement detected, resetting stuck counter");
+            }
             stuckTicks = 0;
+            unstuckAttempts = 0; // Reset attempts when moving normally
+            needsModuleReset = false;
             lastPosition = currentPos;
         }
+
+        return StuckRecoveryAction.NONE;
     }
 
-    // Deprecated - use checkAndHandleStuck instead
-    @Deprecated
-    public boolean checkStuck(PlayerEntity player) {
-        checkAndHandleStuck(player);
-        return false; // Never return true to avoid stopping the module
+    /**
+     * Check if module reset is needed
+     */
+    public boolean needsModuleReset() {
+        return needsModuleReset;
+    }
+
+    /**
+     * Acknowledge that module reset has been performed
+     */
+    public void acknowledgeReset() {
+        needsModuleReset = false;
+        unstuckAttempts = 0;
+        stuckTicks = 0;
+        // Don't reset position to allow immediate detection if still stuck
     }
 
     public void reset() {
         stuckTicks = 0;
         jumpCooldown = 0;
+        unstuckAttempts = 0;
+        needsModuleReset = false;
         lastPosition = null;
+        positionHistory = new Vec3d[20];
+        historyIndex = 0;
     }
 
     public boolean isStuck() {
         return stuckTicks >= STUCK_THRESHOLD;
+    }
+
+    public int getUnstuckAttempts() {
+        return unstuckAttempts;
     }
 
     // Helper method to get current tool durability percentage
@@ -165,5 +239,14 @@ public class SafetyValidator {
 
         int remainingDurability = tool.getMaxDamage() - tool.getDamage();
         return (double) remainingDurability / tool.getMaxDamage();
+    }
+
+    /**
+     * Enum for recovery actions
+     */
+    public enum StuckRecoveryAction {
+        NONE,         // Not stuck, continue normally
+        JUMPED,       // Just jumped, wait to see if it helps
+        NEEDS_RESET   // Need to reset module state
     }
 }

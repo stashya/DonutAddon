@@ -9,8 +9,10 @@ import com.DonutAddon.addon.modules.AI.*;
 import meteordevelopment.meteorclient.utils.player.FindItemResult;
 import meteordevelopment.meteorclient.utils.player.InvUtils;
 import meteordevelopment.orbit.EventHandler;
+import net.minecraft.block.BlockState;
 import net.minecraft.block.entity.*;
 import net.minecraft.client.option.KeyBinding;
+import net.minecraft.fluid.Fluids;
 import net.minecraft.item.ItemStack;
 import net.minecraft.item.MiningToolItem;
 import net.minecraft.item.ShearsItem;
@@ -27,6 +29,18 @@ import meteordevelopment.meteorclient.utils.render.color.Color;
 import meteordevelopment.meteorclient.utils.misc.input.Input;
 import meteordevelopment.meteorclient.systems.modules.Modules;
 import meteordevelopment.meteorclient.systems.modules.player.AutoEat;
+import meteordevelopment.meteorclient.events.game.ReceiveMessageEvent;
+import meteordevelopment.meteorclient.events.packets.PacketEvent;
+import meteordevelopment.meteorclient.utils.player.ChatUtils;
+import meteordevelopment.meteorclient.utils.render.MeteorToast;
+import net.minecraft.network.packet.s2c.play.PlayerPositionLookS2CPacket;
+import net.minecraft.item.Items;
+import net.minecraft.world.World;
+import meteordevelopment.meteorclient.systems.modules.player.EXPThrower;
+import net.minecraft.item.Items;
+
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
 
 
 import java.util.HashSet;
@@ -34,7 +48,7 @@ import java.util.List;
 import java.util.Queue;
 import java.util.Set;
 
-public class AIStashFinder extends Module {
+public class BStar extends Module {
     private final Set<BlockPos> hazardBlocks = new HashSet<>();
     private final Set<BlockPos> waypointBlocks = new HashSet<>(); // Debug: show waypoints
     private final Color hazardColor = new Color(255, 0, 0, 125); // Red with transparency
@@ -46,6 +60,7 @@ public class AIStashFinder extends Module {
     private final SettingGroup sgSafety = settings.createGroup("Safety");
     private final SettingGroup sgRotation = settings.createGroup("Rotation");
     private final SettingGroup sgDebug = settings.createGroup("Debug");
+    private final SettingGroup sgRTP = settings.createGroup("RTP");
 
     // Visible settings
     private final Setting<Integer> scanDepth = sgGeneral.add(new IntSetting.Builder()
@@ -65,8 +80,8 @@ public class AIStashFinder extends Module {
     );
 
     private final Setting<Boolean> disconnectOnBaseFind = sgGeneral.add(new BoolSetting.Builder()
-        .name("disconnect-on-base-find")
-        .description("Disconnect from server when a base is found.")
+        .name("log-when-base-or-spawners")
+        .description("Disconnect from server when a base/spawner is found.")
         .defaultValue(true)
         .build()
     );
@@ -87,7 +102,7 @@ public class AIStashFinder extends Module {
     );
 
     private final Setting<Integer> baseThreshold = sgGeneral.add(new IntSetting.Builder()
-        .name("base-threshold")
+        .name("Min-Storage-for-base")
         .description("Minimum storage blocks to consider as a base.")
         .defaultValue(4)
         .min(1)
@@ -119,19 +134,11 @@ public class AIStashFinder extends Module {
         .build()
     );
 
-    private final Setting<Boolean> printHazardMap = sgDebug.add(new BoolSetting.Builder()
-        .name("print-hazard-map")
-        .description("Print local hazard map periodically.")
-        .defaultValue(false)
-        .visible(debugMode::get)
-        .build()
-    );
-
     // Hidden settings with fixed values
     private final Setting<Integer> yLevel = sgGeneral.add(new IntSetting.Builder()
         .name("y-level")
         .description("Maximum Y level to operate at.")
-        .defaultValue(-30)
+        .defaultValue(-20)
         .range(-64, -10)
         .sliderRange(-64, -10)
         .visible(() -> false)
@@ -190,7 +197,7 @@ public class AIStashFinder extends Module {
         .defaultValue(4.5)
         .range(1, 10)
         .sliderRange(1, 10)
-        .visible(() -> false)
+        .visible(() -> true)
         .build()
     );
 
@@ -200,7 +207,7 @@ public class AIStashFinder extends Module {
         .defaultValue(0.8)
         .range(0.1, 2.0)
         .sliderRange(0.1, 2.0)
-        .visible(() -> false)
+        .visible(() -> true)
         .build()
     );
 
@@ -210,7 +217,7 @@ public class AIStashFinder extends Module {
         .defaultValue(0.3)
         .range(0, 1)
         .sliderRange(0, 1)
-        .visible(() -> false)
+        .visible(() -> true)
         .build()
     );
 
@@ -218,7 +225,7 @@ public class AIStashFinder extends Module {
     private final Setting<Boolean> workInMenus = sgGeneral.add(new BoolSetting.Builder()
         .name("work-in-menus")
         .description("Continue mining while in GUIs/menus.")
-        .defaultValue(true)
+        .defaultValue(false)
         .build()
     );
 
@@ -226,6 +233,92 @@ public class AIStashFinder extends Module {
         .name("pause-for-auto-eat")
         .description("Pauses mining when AutoEat is active and eating.")
         .defaultValue(true)
+        .build()
+    );
+    private final Setting<Boolean> rtpWhenStuck = sgRTP.add(new BoolSetting.Builder()
+        .name("rtp-when-stuck")
+        .description("Use RTP to escape when no paths are found.")
+        .defaultValue(false)
+        .build()
+    );
+    private final Setting<RTPRegion> rtpRegion = sgRTP.add(new EnumSetting.Builder<RTPRegion>()
+        .name("rtp-region")
+        .description("The region to RTP to when stuck.")
+        .defaultValue(RTPRegion.EU_CENTRAL)
+        .visible(rtpWhenStuck::get)
+        .build()
+    );
+
+    private final Setting<Integer> mineDownTarget = sgRTP.add(new IntSetting.Builder()
+        .name("Y-level-to-mine-down-to")
+        .description("Y level to mine down to after RTP.")
+        .defaultValue(-30)
+        .range(-64, -10)
+        .sliderRange(-64, -10)
+        .visible(rtpWhenStuck::get)
+        .build()
+    );
+
+    private final Setting<Integer> groundScanSize = sgRTP.add(new IntSetting.Builder()
+        .name("ground-scan-size")
+        .description("Size of area to scan below player after RTP (NxN).")
+        .defaultValue(5)
+        .range(3, 9)
+        .sliderRange(3, 9)
+        .visible(() -> false)
+        .build()
+    );
+
+    // RTP Enum (same structure as AutoRTP)
+    public enum RTPRegion {
+        EU_CENTRAL("Eu Central", "eu central"),
+        EU_WEST("Eu West", "eu west"),
+        NA_EAST("Na East", "east"),
+        NA_WEST("Na West", "west"),
+        OCEANIA("Oceania", "oceania"),
+        ASIA("Asia", "asia");
+
+        private final String name;
+        private final String command;
+
+        RTPRegion(String name, String command) {
+            this.name = name;
+            this.command = command;
+        }
+
+        @Override
+        public String toString() {
+            return name;
+        }
+
+        public String getCommand() {
+            return command;
+        }
+    }
+    private final Setting<Boolean> autoRepair = sgGeneral.add(new BoolSetting.Builder()
+        .name("auto-repair")
+        .description("Automatically throw EXP bottles to repair pickaxe when durability is low.")
+        .defaultValue(false)
+        .build()
+    );
+
+    private final Setting<Double> repairThreshold = sgGeneral.add(new DoubleSetting.Builder()
+        .name("repair-threshold")
+        .description("Durability percentage to trigger auto repair.")
+        .defaultValue(20.0)
+        .range(10.0, 50.0)
+        .sliderRange(10.0, 50.0)
+        .visible(autoRepair::get)
+        .build()
+    );
+
+    private final Setting<Integer> repairDuration = sgGeneral.add(new IntSetting.Builder()
+        .name("repair-duration")
+        .description("How many seconds to throw EXP bottles.")
+        .defaultValue(3)
+        .range(1, 5)
+        .sliderRange(1, 5)
+        .visible(autoRepair::get)
         .build()
     );
 
@@ -238,6 +331,7 @@ public class AIStashFinder extends Module {
     private void stopMovement() {
         setPressed(mc.options.attackKey, false);
         setPressed(mc.options.forwardKey, false);
+        setPressed(mc.options.sneakKey, false); // ADD THIS to always release sneak
     }
 
     private void startMining() {
@@ -253,6 +347,7 @@ public class AIStashFinder extends Module {
     private RotationController rotationController;
     private final SimpleSneakCentering centeringHelper = new SimpleSneakCentering();
     private ParkourHelper parkourHelper;
+    private boolean isDetouring = false;
 
     // Mining tracking
     private int blocksMined = 0;
@@ -270,14 +365,41 @@ public class AIStashFinder extends Module {
     private int tickCounter = 0;
     private long moduleStartTime = 0;
 
+    private long lastRtpTime = 0;
+    private int rtpWaitTicks = 0;
+    private int rtpAttempts = 0;
+    private BlockPos preRtpPos = null;
+    private boolean rtpCommandSent = false;
+    private boolean hasReachedMineDepth = false;
+    private int mineDownScanTicks = 0;
+    private static final int RTP_COOLDOWN_SECONDS = 16;
+    private static final int RTP_WAIT_TICKS = 200; // 10 seconds
+    private static final int MINE_DOWN_SCAN_INTERVAL = 2; // Scan every 2 ticks while mining down
+    private static final Pattern RTP_COOLDOWN_PATTERN = Pattern.compile("You can't rtp for another (\\d+)s");
+
+    private boolean isThrowingExp = false;
+    private MiningState stateBeforeExp = MiningState.IDLE;
+    private int expThrowTicks = 0;
+    private static final int EXP_THROW_DURATION = 60; // 3 seconds (60 ticks)
+    private static final double REPAIR_DURABILITY_THRESHOLD = 0.20; // 20% durability
+    private long lastExpThrowTime = 0;
+    private static final long EXP_THROW_COOLDOWN = 10000; // 10 second cooldown between repairs
+
     private boolean wasPausedForEating = false;
     private MiningState stateBeforeEating = MiningState.IDLE;
+
+    private boolean inRTPRecovery = false;
 
     // Stash detection
     private final Set<ChunkPos> processedChunks = new HashSet<>();
 
-    public AIStashFinder() {
-        super(DonutAddon.CATEGORY, "AI-StashFinder", "(Beta) Automatically mines with directional persistence and intelligent pathfinding.");
+    private boolean isActivelyMining() {
+        return currentState == MiningState.MINING_PRIMARY ||
+            currentState == MiningState.FOLLOWING_DETOUR;
+    }
+
+    public BStar() {
+        super(DonutAddon.CATEGORY, "BStar", "(Beta) Automatically mines with directional persistence and intelligent pathfinding. B* method");
     }
 
     @EventHandler
@@ -300,6 +422,114 @@ public class AIStashFinder extends Module {
             }
         }
     }
+    @EventHandler
+    private void onReceiveMessage(ReceiveMessageEvent event) {
+        if (!rtpWhenStuck.get()) return;
+
+        String message = event.getMessage().getString();
+
+        // Check for RTP cooldown message
+        Matcher cooldownMatcher = RTP_COOLDOWN_PATTERN.matcher(message);
+        if (cooldownMatcher.find() && currentState == MiningState.RTP_INITIATED) {
+            int remainingSeconds = Integer.parseInt(cooldownMatcher.group(1));
+
+            if (debugMode.get()) {
+                warning("RTP on cooldown for " + remainingSeconds + " more seconds");
+            }
+
+            // Set to cooldown state
+            currentState = MiningState.RTP_COOLDOWN;
+            rtpWaitTicks = (RTP_COOLDOWN_SECONDS - remainingSeconds) * 20;
+        }
+    }
+
+    @EventHandler
+    private void onPacketReceive(PacketEvent.Receive event) {
+        if (!rtpWhenStuck.get()) return;
+        if (!(event.packet instanceof PlayerPositionLookS2CPacket)) return;
+
+        // Handle teleport during RTP states
+        if (currentState == MiningState.RTP_INITIATED || currentState == MiningState.RTP_WAITING) {
+            // Set recovery flag when we detect teleport
+            inRTPRecovery = true;
+
+            // Schedule position check after teleport
+            new Thread(() -> {
+                try {
+                    Thread.sleep(100); // Wait for position to update
+                } catch (InterruptedException e) {
+                    e.printStackTrace();
+                }
+
+                mc.execute(() -> {
+                    if (mc.player != null) {
+                        BlockPos newPos = mc.player.getBlockPos();
+
+                        // Check if we actually teleported (moved significantly)
+                        if (preRtpPos != null) {
+                            double distance = Math.sqrt(
+                                Math.pow(newPos.getX() - preRtpPos.getX(), 2) +
+                                    Math.pow(newPos.getZ() - preRtpPos.getZ(), 2)
+                            );
+
+                            if (distance > 1000) { // Teleported far away
+                                if (debugMode.get()) {
+                                    info("RTP teleport detected! New position: " + newPos);
+                                    info("Current Y: " + newPos.getY() + " (will mine down to Y=" + mineDownTarget.get() + ")");
+                                }
+
+                                lastRtpTime = System.currentTimeMillis();
+                                inRTPRecovery = true; // Ensure flag is set
+
+                                // Transition to ground scanning
+                                currentState = MiningState.RTP_SCANNING_GROUND;
+                                rtpWaitTicks = 0;
+                            }
+                        }
+                    }
+                });
+            }).start();
+        }
+    }
+
+    private void handleRTPInitiated() {
+        rtpWaitTicks++;
+
+        // Wait a bit for command to process
+        if (rtpWaitTicks > 20) { // 1 second
+            currentState = MiningState.RTP_WAITING;
+            rtpWaitTicks = 0;
+        }
+    }
+    private void handleRTPWaiting() {
+        rtpWaitTicks++;
+
+        // Timeout after 10 seconds
+        if (rtpWaitTicks > RTP_WAIT_TICKS) {
+            if (debugMode.get()) {
+                warning("RTP timeout - may have failed or be on cooldown");
+            }
+
+            // Try again or fall back to stopped
+            if (rtpAttempts < 3) {
+                initiateRTP();
+            } else {
+                error("RTP failed after 3 attempts - stopping module");
+                toggle();
+            }
+        }
+    }
+    private void handleRTPCooldown() {
+        rtpWaitTicks++;
+
+        int cooldownTicks = RTP_COOLDOWN_SECONDS * 20;
+        if (rtpWaitTicks >= cooldownTicks) {
+            if (debugMode.get()) {
+                info("RTP cooldown complete, retrying...");
+            }
+            initiateRTP();
+        }
+    }
 
     @Override
     public void onActivate() {
@@ -312,13 +542,6 @@ public class AIStashFinder extends Module {
             return;
         }
 
-        // Check Y level
-        if (mc.player.getY() > yLevel.get()) {
-            error("You must be below Y=" + yLevel.get() + " to use this module! Current Y: " + Math.round(mc.player.getY()));
-            toggle();
-            return;
-        }
-
         // Initialize components
         try {
             pathScanner = new PathScanner();
@@ -326,6 +549,7 @@ public class AIStashFinder extends Module {
             pathfinder = new DirectionalPathfinder(pathScanner);
             safetyValidator = new SafetyValidator();
             rotationController = new RotationController();
+            rotationController.setPreciseLanding(false);
             parkourHelper = new ParkourHelper();
         } catch (Exception e) {
             error("Failed to initialize components: " + e.getMessage());
@@ -334,7 +558,6 @@ public class AIStashFinder extends Module {
         }
 
         // Reset state
-        currentState = MiningState.CENTERING;
         blocksMined = 0;
         totalBlocksMined = 0;
         lastPos = mc.player.getPos();
@@ -342,7 +565,29 @@ public class AIStashFinder extends Module {
         tickCounter = 0;
         processedChunks.clear();
 
-        info("AIStashFinder activated at Y=" + Math.round(mc.player.getY()));
+        // Reset RTP state
+        lastRtpTime = 0;
+        rtpWaitTicks = 0;
+        rtpAttempts = 0;
+        preRtpPos = null;
+        rtpCommandSent = false;
+        hasReachedMineDepth = false;
+        mineDownScanTicks = 0;
+        inRTPRecovery = false;
+
+        info("BStar activated at Y=" + Math.round(mc.player.getY()));
+
+        // Check if we're starting above ground - always mine down if above target
+        if (mc.player.getY() > yLevel.get()) {
+            warning("Started above Y=" + yLevel.get() + " - will scan ground and mine down to target depth");
+            // Set to scanning ground state to check for fluids and mine down
+            currentState = MiningState.RTP_SCANNING_GROUND;
+            inRTPRecovery = true;  // Use the recovery flag to bypass Y-level checks
+        } else {
+            // Normal underground start
+            currentState = MiningState.CENTERING;
+        }
+
         if (debugMode.get()) {
             info("Debug mode enabled - verbose logging active");
         }
@@ -364,7 +609,17 @@ public class AIStashFinder extends Module {
             waypointBlocks.clear();
         }
 
+        if (isThrowingExp) {
+            EXPThrower expThrower = Modules.get().get(EXPThrower.class);
+            if (expThrower != null && expThrower.isActive()) {
+                expThrower.toggle();
+            }
+            isThrowingExp = false;
+        }
+
         currentState = MiningState.IDLE;
+        inRTPRecovery = false;
+
         if (safetyValidator != null) {
             safetyValidator.reset();
         }
@@ -374,7 +629,7 @@ public class AIStashFinder extends Module {
         processedChunks.clear();
 
         long runtime = (System.currentTimeMillis() - moduleStartTime) / 1000;
-        info("AIStashFinder deactivated. Runtime: " + runtime + "s, Blocks mined: " + totalBlocksMined);
+        info("Bstar deactivated. Runtime: " + runtime + "s, Blocks mined: " + totalBlocksMined);
     }
 
     @EventHandler
@@ -436,7 +691,6 @@ public class AIStashFinder extends Module {
 
         // Check if we should pause for menus
         if (!workInMenus.get() && mc.currentScreen != null) {
-            // Stop movement when in menus if setting is disabled
             if (mc.options != null) {
                 stopMovement();
             }
@@ -449,33 +703,25 @@ public class AIStashFinder extends Module {
             return;
         }
 
+        // MOVED THIS CHECK AFTER EATING CHECK AND ADDED RTP STATE CHECK
         if (pauseForAutoEat.get()) {
             AutoEat autoEat = Modules.get().get(AutoEat.class);
 
             if (autoEat != null && autoEat.isActive()) {
-                // Check if AutoEat is currently eating or should start eating
                 if (autoEat.eating || autoEat.shouldEat()) {
-                    // Pause mining if not already paused
                     if (!wasPausedForEating) {
                         wasPausedForEating = true;
-                        stateBeforeEating = currentState; // Save current state
-
-                        // Stop all movement and mining
+                        stateBeforeEating = currentState;
                         stopMovement();
-
-                        // Set state to a paused state (you might want to add a PAUSED_EATING state)
                         currentState = MiningState.IDLE;
-
                         if (debugMode.get()) {
                             info("Pausing for AutoEat (hunger/health low)");
                         }
                     }
-                    return; // Skip the rest of the tick while eating
+                    return;
                 } else if (wasPausedForEating) {
-                    // AutoEat finished, resume mining
                     wasPausedForEating = false;
-                    currentState = stateBeforeEating; // Restore previous state
-
+                    currentState = stateBeforeEating;
                     if (debugMode.get()) {
                         info("AutoEat finished, resuming mining");
                     }
@@ -483,16 +729,151 @@ public class AIStashFinder extends Module {
             }
         }
 
-        // Check Y level every tick for safety
-        if (mc.player.getY() > yLevel.get()) {
-            error("Moved above Y=" + yLevel.get() + "! Disabling module for safety.");
-            toggle();
-            return;
+        // NEW: Auto Repair with EXP bottles
+        if (autoRepair.get() && !isThrowingExp && !isInRTPState()) {
+            // Check if enough time has passed since last repair
+            long timeSinceLastRepair = System.currentTimeMillis() - lastExpThrowTime;
+
+            if (timeSinceLastRepair >= EXP_THROW_COOLDOWN || lastExpThrowTime == 0) {
+                if (needsRepair() && hasExpBottles()) {
+                    if (debugMode.get()) {
+                        ItemStack mainHand = mc.player.getMainHandStack();
+                        double durabilityPercent = SafetyValidator.getToolDurabilityPercent(mainHand);
+                        info("Pickaxe durability at " + String.format("%.1f%%", durabilityPercent * 100) +
+                            " - starting auto repair");
+                    }
+
+                    // Save current state
+                    stateBeforeExp = currentState;
+                    isThrowingExp = true;
+                    expThrowTicks = 0;
+
+                    // Stop all movement
+                    stopMovement();
+
+                    // Start rotating to look down
+                    currentState = MiningState.ROTATING;
+                    rotationController.setPreciseLanding(true);
+                    rotationController.startRotation(mc.player.getYaw(), 90.0f, () -> {
+                        rotationController.setPreciseLanding(false);
+
+                        // Activate EXPThrower module
+                        EXPThrower expThrower = Modules.get().get(EXPThrower.class);
+                        if (expThrower != null && !expThrower.isActive()) {
+                            expThrower.toggle();
+                            if (debugMode.get()) {
+                                info("EXPThrower activated for repair");
+                            }
+                        }
+                    });
+                    return;
+                }
+            }
         }
 
+        // Handle ongoing EXP throwing
+        if (isThrowingExp) {
+            handleExpThrowing();
+            return; // Skip everything else while throwing EXP
+        }
 
+        // Skip stuck detection during mining down or RTP states
+        if (!isInRTPState()) {
+            SafetyValidator.StuckRecoveryAction recoveryAction = safetyValidator.checkAndHandleStuck(mc.player);
 
-        if (!safetyValidator.canContinue(mc.player, yLevel.get())) {
+            switch (recoveryAction) {
+                case JUMPED:
+                    // First attempt - just jumped, let it settle
+                    if (debugMode.get()) {
+                        info("Stuck detected - attempted jump recovery");
+                    }
+                    // Continue with current state but pause movement briefly
+                    stopMovement();
+                    return; // Skip this tick to let jump take effect
+
+                case NEEDS_RESET:
+                    // Second attempt - reset module state
+                    if (debugMode.get()) {
+                        warning("Jump didn't resolve stuck state - resetting module logic");
+                    }
+
+                    // Stop all current actions
+                    stopMovement();
+
+                    // Clear any ongoing operations
+                    currentWaypoint = null;
+                    lastHazardDetected = null;
+                    pendingDirection = null;
+                    isDetouring = false;
+
+                    // Clear visual indicators
+                    synchronized (hazardBlocks) {
+                        hazardBlocks.clear();
+                    }
+                    synchronized (waypointBlocks) {
+                        waypointBlocks.clear();
+                    }
+
+                    // Reset pathfinding components - CHECK FOR NULL AND PRIMARY DIRECTION
+                    if (pathfinder != null && pathfinder.getPrimaryDirection() != null) {
+                        pathfinder.completeDetour();
+                    }
+
+                    // Reset to centering state to recalculate everything
+                    currentState = MiningState.CENTERING;
+                    blocksMined = 0;
+                    scanTicks = 0;
+
+                    // Acknowledge the reset to the safety validator
+                    safetyValidator.acknowledgeReset();
+
+                    if (debugMode.get()) {
+                        info("Module state reset - starting fresh from centering");
+                    }
+                    return; // Skip this tick to let reset take effect
+
+                case NONE:
+                    // Not stuck, continue normally
+                    break;
+            }
+
+            // Also add a periodic movement check as a backup
+            // This runs every 2 seconds to catch edge cases
+            if (tickCounter % 40 == 0 && currentState == MiningState.MINING_PRIMARY) {
+                Vec3d currentPos = mc.player.getPos();
+                double distanceFromLastCheck = currentPos.distanceTo(lastPos);
+
+                if (distanceFromLastCheck < 0.1) {
+                    // Haven't moved much in 2 seconds while mining
+                    if (debugMode.get()) {
+                        warning("No movement detected while mining - possible stuck on corner");
+                    }
+
+                    // Try a quick rotation adjustment to unstick from corners
+                    float currentYaw = mc.player.getYaw();
+                    Direction currentDir = getCardinalDirection(currentYaw);
+                    float targetYaw = directionToYaw(currentDir);
+
+                    // If we're slightly off angle (due to overshoot), correct it
+                    float yawDiff = Math.abs(MathHelper.wrapDegrees(currentYaw - targetYaw));
+                    if (yawDiff > 2.0f) {
+                        if (debugMode.get()) {
+                            info("Correcting rotation drift: " + yawDiff + " degrees off");
+                        }
+
+                        stopMovement();
+                        currentState = MiningState.ROTATING;
+                        rotationController.setPreciseLanding(true); // Ensure precise landing for correction
+                        rotationController.startRotation(targetYaw, 0.0f, () -> {
+                            rotationController.setPreciseLanding(false); // Return to normal after correction
+                            currentState = MiningState.SCANNING_PRIMARY;
+                        });
+                    }
+                }
+            }
+        }
+
+        if (!isInRTPState() && !safetyValidator.canContinue(mc.player, yLevel.get())) {
             // Check specific reason for failure
             ItemStack mainHand = mc.player.getMainHandStack();
             if (mainHand != null && !mainHand.isEmpty()) {
@@ -512,6 +893,7 @@ public class AIStashFinder extends Module {
             toggle();
             return;
         }
+
         // Update settings
         pathScanner.updateScanWidths(scanWidthFalling.get(), scanWidthFluids.get());
         rotationController.updateSettings(
@@ -525,13 +907,6 @@ public class AIStashFinder extends Module {
         // Update helpers
         if (parkourHelper != null) {
             parkourHelper.update();
-        }
-
-        // Check if we should continue
-        if (!safetyValidator.canContinue(mc.player, yLevel.get())) {
-            error("Safety check failed - need full health or better tool");
-            toggle();
-            return;
         }
 
         // Check for pickaxe
@@ -568,6 +943,11 @@ public class AIStashFinder extends Module {
                 case FOLLOWING_DETOUR -> handleFollowingDetour();
                 case CHANGING_DIRECTION -> handleChangingDirection();
                 case ROTATING -> currentState = MiningState.SCANNING_PRIMARY;
+                case RTP_INITIATED -> handleRTPInitiated();
+                case RTP_WAITING -> handleRTPWaiting();
+                case RTP_COOLDOWN -> handleRTPCooldown();
+                case RTP_SCANNING_GROUND -> handleRTPScanningGround();
+                case MINING_DOWN -> handleMiningDown();
                 case STOPPED -> {
                     error("All directions blocked - stopping");
                     toggle();
@@ -612,6 +992,15 @@ public class AIStashFinder extends Module {
                 info("Initial direction set to " + finalDir.getName() + ", starting mining");
             }
         });
+    }
+
+    private boolean isInRTPState() {
+        return currentState == MiningState.RTP_INITIATED ||
+            currentState == MiningState.RTP_WAITING ||
+            currentState == MiningState.RTP_COOLDOWN ||
+            currentState == MiningState.RTP_SCANNING_GROUND ||
+            currentState == MiningState.MINING_DOWN ||
+            inRTPRecovery;
     }
 
     private void handleScanningPrimary() {
@@ -668,15 +1057,250 @@ public class AIStashFinder extends Module {
             }
         }
     }
+    private void handleRTPScanningGround() {
+        stopMovement();
 
-    private void handleMiningPrimary() {
-        // Y-level check
-        if (mc.player.getY() > yLevel.get()) {
-            error("Moved above Y=" + yLevel.get() + " while mining!");
-            stopMovement();
-            toggle();
+        // Check if we're already below the target depth
+        if (mc.player.getY() <= mineDownTarget.get()) {
+            if (debugMode.get()) {
+                info("Already below target depth Y=" + Math.round(mc.player.getY()) + " - resuming normal mining");
+            }
+
+            // Skip mining down, go straight to normal mining
+            hasReachedMineDepth = true;
+            rtpAttempts = 0;
+            inRTPRecovery = false;
+
+            // Start normal mining sequence
+            currentState = MiningState.CENTERING;
             return;
         }
+
+        // First, check if we need to center before mining down
+        if (!centeringHelper.isCentering() && !isCenteredOnBlock(mc.player.getBlockPos())) {
+            if (debugMode.get()) {
+                info("Centering before mining down...");
+            }
+
+            if (centeringHelper.startCentering()) {
+                // Stay in this state while centering
+                return;
+            }
+        } else if (centeringHelper.isCentering()) {
+            // Currently centering, check if done
+            if (!centeringHelper.tick()) {
+                // Centering complete
+                if (debugMode.get()) {
+                    info("Centering complete, now checking ground and rotating down");
+                }
+            } else {
+                // Still centering
+                return;
+            }
+        }
+
+        // We're now centered, rotate to look straight down
+        float currentPitch = mc.player.getPitch();
+        if (Math.abs(currentPitch - 90.0f) > 1.0f) {
+            if (debugMode.get()) {
+                info("Looking down to scan ground...");
+            }
+
+            currentState = MiningState.ROTATING;
+            rotationController.setPreciseLanding(true);
+            rotationController.startRotation(mc.player.getYaw(), 90.0f, () -> {
+                rotationController.setPreciseLanding(false);
+                currentState = MiningState.RTP_SCANNING_GROUND;
+            });
+            return;
+        }
+
+        // Scan ground below
+        if (scanGroundBelow()) {
+            // Ground is safe, start mining down
+            if (debugMode.get()) {
+                info("Ground is safe - starting to mine down to Y=" + mineDownTarget.get());
+            }
+
+            hasReachedMineDepth = false;
+            mineDownScanTicks = 0;
+            currentState = MiningState.MINING_DOWN;
+
+            // Start mining (no sneak needed since we're centered)
+            setPressed(mc.options.attackKey, true);
+            setPressed(mc.options.sneakKey, true); // Still sneak for safety
+        } else {
+            // Ground has fluids - ALWAYS try RTP if enabled
+            if (debugMode.get()) {
+                warning("Fluids detected below!");
+            }
+
+            // Check if RTP is enabled
+            if (rtpWhenStuck.get()) {
+                if (debugMode.get()) {
+                    if (rtpAttempts == 0) {
+                        info("Surface has fluids below - initiating RTP to find safe ground");
+                    } else {
+                        warning("RTP landed on fluids - trying again (attempt " + (rtpAttempts + 1) + "/5)");
+                    }
+                }
+
+                rtpAttempts++;
+                if (rtpAttempts < 5) {
+                    initiateRTP();
+                } else {
+                    error("Failed to find safe ground after 5 RTP attempts");
+                    toggle();
+                }
+            } else {
+                // RTP not enabled, can't escape fluids
+                error("Cannot mine down - fluids detected below! Enable 'RTP When Stuck' or try starting from a different location.");
+                toggle();
+            }
+        }
+    }
+
+    private void handleMiningDown() {
+        // Check if we've reached target depth
+        if (mc.player.getY() <= mineDownTarget.get()) {
+            if (!hasReachedMineDepth) {
+                if (debugMode.get()) {
+                    info("Reached target depth Y=" + Math.round(mc.player.getY()) + " - starting normal mining sequence");
+                }
+
+                hasReachedMineDepth = true;
+                stopMovement();
+
+                // Clear RTP recovery state
+                rtpAttempts = 0;
+                inRTPRecovery = false;
+                rtpCommandSent = false;
+
+                // Instead of manually setting up, go to CENTERING state
+                // This will properly initialize everything like a fresh start
+                currentState = MiningState.CENTERING;
+
+                if (debugMode.get()) {
+                    info("Entering centering state to begin normal mining");
+                }
+            }
+            return;
+        }
+
+        // Continue mining down with periodic safety checks
+        mineDownScanTicks++;
+
+        if (mineDownScanTicks >= MINE_DOWN_SCAN_INTERVAL) {
+            mineDownScanTicks = 0;
+
+            // Quick scan for fluids while mining down
+            if (!scanGroundBelow()) {
+                // IMMEDIATELY STOP MINING
+                stopMovement();
+                setPressed(mc.options.sneakKey, false); // Also stop sneaking
+
+                if (debugMode.get()) {
+                    error("Fluids detected while mining down - stopping immediately!");
+                }
+
+                // ALWAYS try RTP if enabled and fluids detected
+                if (rtpWhenStuck.get()) {
+                    rtpAttempts++;
+                    if (rtpAttempts < 5) {
+                        if (debugMode.get()) {
+                            info("Attempting RTP to escape fluids (attempt " + rtpAttempts + "/5)");
+                        }
+                        initiateRTP();
+                    } else {
+                        error("Too many fluid encounters - stopping module");
+                        inRTPRecovery = false;
+                        toggle();
+                    }
+                } else {
+                    // RTP not enabled, can't escape
+                    error("Hit fluids while mining down - cannot continue without RTP enabled");
+                    inRTPRecovery = false;
+                    toggle();
+                }
+
+                return; // Exit immediately, don't continue mining
+            }
+        }
+
+        // Keep mining down
+        setPressed(mc.options.attackKey, true);
+        setPressed(mc.options.sneakKey, true);
+    }
+
+    private boolean scanGroundBelow() {
+        World world = mc.world;
+        BlockPos playerPos = mc.player.getBlockPos();
+        int scanRadius = groundScanSize.get() / 2;
+
+        // Scan area below player (check up to 10 blocks down)
+        for (int depth = 1; depth <= 10; depth++) {
+            for (int x = -scanRadius; x <= scanRadius; x++) {
+                for (int z = -scanRadius; z <= scanRadius; z++) {
+                    BlockPos checkPos = playerPos.add(x, -depth, z);
+                    BlockState state = world.getBlockState(checkPos);
+
+                    // Check for fluids
+                    if (state.getFluidState().getFluid() == Fluids.LAVA ||
+                        state.getFluidState().getFluid() == Fluids.FLOWING_LAVA ||
+                        state.getFluidState().getFluid() == Fluids.WATER ||
+                        state.getFluidState().getFluid() == Fluids.FLOWING_WATER) {
+
+                        if (debugMode.get()) {
+                            String fluidType = state.getFluidState().getFluid() == Fluids.LAVA ? "Lava" : "Water";
+                            System.out.println("Found " + fluidType + " at depth " + depth + ", offset X=" + x + " Z=" + z);
+                        }
+                        return false;
+                    }
+                }
+            }
+        }
+
+        return true; // No fluids found
+    }
+
+    private void initiateRTP() {
+        if (mc.player == null) return;
+
+        // Set recovery flag BEFORE doing anything else
+        inRTPRecovery = true;
+
+        // Check cooldown
+        long timeSinceLastRtp = System.currentTimeMillis() - lastRtpTime;
+        if (lastRtpTime > 0 && timeSinceLastRtp < (RTP_COOLDOWN_SECONDS * 1000L)) {
+            int remainingSeconds = (int)((RTP_COOLDOWN_SECONDS * 1000L - timeSinceLastRtp) / 1000L);
+
+            if (debugMode.get()) {
+                info("RTP on cooldown for " + remainingSeconds + " more seconds");
+            }
+
+            currentState = MiningState.RTP_COOLDOWN;
+            rtpWaitTicks = (RTP_COOLDOWN_SECONDS - remainingSeconds) * 20;
+            return;
+        }
+
+        // Store current position
+        preRtpPos = mc.player.getBlockPos();
+
+        // Send RTP command
+        String command = "/rtp " + rtpRegion.get().getCommand();
+        ChatUtils.sendPlayerMsg(command);
+
+        if (debugMode.get()) {
+            info("Sending RTP command to " + rtpRegion.get().toString() + " (attempt #" + (rtpAttempts + 1) + ")");
+        }
+
+        // Update state
+        currentState = MiningState.RTP_INITIATED;
+        rtpWaitTicks = 0;
+        rtpCommandSent = true;
+    }
+
+    private void handleMiningPrimary() {
 
         Vec3d currentPos = mc.player.getPos();
         scanTicks++;
@@ -782,6 +1406,7 @@ public class AIStashFinder extends Module {
             }
         } else if (plan.needsDetour) {
             // Start following detour
+            isDetouring = true;
             currentWaypoint = pathfinder.getNextWaypoint();
             if (currentWaypoint != null) {
                 currentState = MiningState.FOLLOWING_DETOUR;
@@ -803,8 +1428,34 @@ public class AIStashFinder extends Module {
                 }
             }
         } else {
-            // No path possible
-            currentState = MiningState.STOPPED;
+            // Check if this is a "no paths found" situation (null direction returned)
+            // This happens when the pathfinder can't find any valid direction
+            if (plan.reason != null && plan.reason.contains("No valid paths")) {
+                // Check if RTP is enabled for stuck situations
+                if (rtpWhenStuck.get()) {
+                    if (debugMode.get()) {
+                        warning("Completely blocked with no valid paths - initiating RTP recovery");
+                    }
+
+                    mc.getToastManager().add(new MeteorToast(
+                        Items.ENDER_PEARL,
+                        "No Paths Found",
+                        "Initiating RTP Recovery"
+                    ));
+
+                    rtpAttempts = 0;
+                    initiateRTP();
+                } else {
+                    // RTP not enabled, stop the module
+                    currentState = MiningState.STOPPED;
+                    if (debugMode.get()) {
+                        error("No valid paths found and RTP is disabled - stopping");
+                    }
+                }
+            } else {
+                // Some other reason for no path
+                currentState = MiningState.STOPPED;
+            }
         }
     }
 
@@ -822,6 +1473,59 @@ public class AIStashFinder extends Module {
         return offsetX <= 0.25 && offsetZ <= 0.25;
     }
 
+    private boolean needsRepair() {
+        if (!autoRepair.get()) return false;
+
+        ItemStack mainHand = mc.player.getMainHandStack();
+        if (mainHand == null || mainHand.isEmpty() || !isTool(mainHand)) {
+            return false;
+        }
+
+        double durabilityPercent = SafetyValidator.getToolDurabilityPercent(mainHand);
+        return durabilityPercent <= (repairThreshold.get() / 100.0);
+    }
+
+    private boolean hasExpBottles() {
+        FindItemResult exp = InvUtils.findInHotbar(Items.EXPERIENCE_BOTTLE);
+        return exp.found();
+    }
+
+    private void handleExpThrowing() {
+        expThrowTicks++;
+
+        // First, ensure we're looking down
+        float currentPitch = mc.player.getPitch();
+        if (Math.abs(currentPitch - 90.0f) > 1.0f && expThrowTicks < 10) {
+            // Still need to rotate
+            return;
+        }
+
+        // Check if we're done throwing
+        if (expThrowTicks >= (repairDuration.get() * 20)) { // Convert seconds to ticks
+            if (debugMode.get()) {
+                info("Finished throwing EXP bottles, resuming mining");
+            }
+
+            // Stop EXPThrower module
+            EXPThrower expThrower = Modules.get().get(EXPThrower.class);
+            if (expThrower != null && expThrower.isActive()) {
+                expThrower.toggle();
+            }
+
+            // Resume previous state
+            isThrowingExp = false;
+            currentState = stateBeforeExp;
+            expThrowTicks = 0;
+            lastExpThrowTime = System.currentTimeMillis();
+
+            // Rotate back to normal pitch
+            currentState = MiningState.ROTATING;
+            rotationController.startRotation(mc.player.getYaw(), 0.0f, () -> {
+                currentState = stateBeforeExp;
+            });
+        }
+    }
+
     private void handleFollowingDetour() {
         // Check if we have a current waypoint
         if (currentWaypoint == null) {
@@ -830,6 +1534,7 @@ public class AIStashFinder extends Module {
             if (currentWaypoint == null) {
                 // Detour complete
                 pathfinder.completeDetour();
+                isDetouring = false;
                 currentState = MiningState.SCANNING_PRIMARY;
 
                 synchronized (waypointBlocks) {
@@ -965,7 +1670,29 @@ public class AIStashFinder extends Module {
 
     private void handleChangingDirection() {
         if (pendingDirection == null) {
-            currentState = MiningState.STOPPED;
+            // This shouldn't happen anymore since we handle RTP in handleCalculatingDetour
+            // But keep as a safety fallback
+            if (debugMode.get()) {
+                warning("handleChangingDirection called with null pendingDirection - this shouldn't happen");
+            }
+
+            // Try RTP as a last resort if enabled
+            if (rtpWhenStuck.get()) {
+                if (debugMode.get()) {
+                    warning("Initiating RTP recovery as fallback");
+                }
+
+                mc.getToastManager().add(new MeteorToast(
+                    Items.ENDER_PEARL,
+                    "No Paths Found",
+                    "Initiating RTP Recovery"
+                ));
+
+                rtpAttempts = 0;
+                initiateRTP();
+            } else {
+                currentState = MiningState.STOPPED;
+            }
             return;
         }
 
@@ -1046,8 +1773,8 @@ public class AIStashFinder extends Module {
 
         // Create disconnect message
         String message = type.equals("spawners") ?
-            "DonutClient AIStashFinder Found spawners" :
-            "DonutClient AIStashFinder Found base";
+            "DonutClient BStar Found spawners" :
+            "DonutClient BStar Found base";
 
         error(message);
 
