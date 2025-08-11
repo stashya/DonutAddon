@@ -390,6 +390,10 @@ public class BStar extends Module {
 
     private boolean inRTPRecovery = false;
 
+    // Add this field to track if we've initiated mining down
+    private boolean miningDownInitiated = false;
+    private int miningDownToggleTicks = 0;
+
     // Stash detection
     private final Set<ChunkPos> processedChunks = new HashSet<>();
 
@@ -702,7 +706,7 @@ public class BStar extends Module {
             toggle();
             return;
         }
-
+        rotationController.update();
         // MOVED THIS CHECK AFTER EATING CHECK AND ADDED RTP STATE CHECK
         if (pauseForAutoEat.get()) {
             AutoEat autoEat = Modules.get().get(AutoEat.class);
@@ -739,7 +743,7 @@ public class BStar extends Module {
                     if (debugMode.get()) {
                         ItemStack mainHand = mc.player.getMainHandStack();
                         double durabilityPercent = SafetyValidator.getToolDurabilityPercent(mainHand);
-                        info("Pickaxe durability at " + String.format("%.1f%%", durabilityPercent * 100) +
+                        info("Pickaxe durability at " + String.format("%.1f%%%%", durabilityPercent * 100) +
                             " - starting auto repair");
                     }
 
@@ -1124,11 +1128,11 @@ public class BStar extends Module {
 
             hasReachedMineDepth = false;
             mineDownScanTicks = 0;
+            miningDownInitiated = false; // RESET FLAG
+            miningDownToggleTicks = 0;
             currentState = MiningState.MINING_DOWN;
 
-            // Start mining (no sneak needed since we're centered)
-            setPressed(mc.options.attackKey, true);
-            setPressed(mc.options.sneakKey, true); // Still sneak for safety
+            // DON'T start mining here - let handleMiningDown do it with proper toggle
         } else {
             // Ground has fluids - ALWAYS try RTP if enabled
             if (debugMode.get()) {
@@ -1169,15 +1173,18 @@ public class BStar extends Module {
                 }
 
                 hasReachedMineDepth = true;
+
+                // IMPORTANT: Stop ALL movement including sneak BEFORE transitioning
                 stopMovement();
+                setPressed(mc.options.sneakKey, false); // EXPLICITLY RELEASE SNEAK
 
                 // Clear RTP recovery state
                 rtpAttempts = 0;
                 inRTPRecovery = false;
                 rtpCommandSent = false;
+                miningDownInitiated = false; // Reset flag
 
-                // Instead of manually setting up, go to CENTERING state
-                // This will properly initialize everything like a fresh start
+                // Now go to CENTERING state with no keys pressed
                 currentState = MiningState.CENTERING;
 
                 if (debugMode.get()) {
@@ -1185,6 +1192,39 @@ public class BStar extends Module {
                 }
             }
             return;
+        }
+
+        // FIXED: Toggle keys on first entry or periodically to ensure they register
+        if (!miningDownInitiated) {
+            // First time entering mining down - toggle keys to ensure registration
+            if (debugMode.get()) {
+                info("Initiating mining down - toggling keys to ensure registration");
+            }
+
+            // First, make sure all keys are released
+            stopMovement();
+            setPressed(mc.options.sneakKey, false);
+            setPressed(mc.options.attackKey, false);
+
+            // Small delay then press keys (will happen next tick)
+            miningDownInitiated = true;
+            miningDownToggleTicks = 0;
+            return;
+        }
+
+        // Increment toggle counter
+        miningDownToggleTicks++;
+
+        // Re-toggle keys every 20 ticks (1 second) to ensure they stay registered
+        if (miningDownToggleTicks % 20 == 0) {
+            // Quick toggle to refresh key state
+            setPressed(mc.options.attackKey, false);
+            setPressed(mc.options.sneakKey, false);
+
+            // Will re-press on next line
+            if (debugMode.get() && miningDownToggleTicks % 100 == 0) {
+                System.out.println("Refreshing mining keys (tick " + miningDownToggleTicks + ")");
+            }
         }
 
         // Continue mining down with periodic safety checks
@@ -1195,9 +1235,9 @@ public class BStar extends Module {
 
             // Quick scan for fluids while mining down
             if (!scanGroundBelow()) {
-                // IMMEDIATELY STOP MINING
+                // IMMEDIATELY STOP MINING AND SNEAKING
                 stopMovement();
-                setPressed(mc.options.sneakKey, false); // Also stop sneaking
+                setPressed(mc.options.sneakKey, false); // Release sneak immediately
 
                 if (debugMode.get()) {
                     error("Fluids detected while mining down - stopping immediately!");
@@ -1214,12 +1254,14 @@ public class BStar extends Module {
                     } else {
                         error("Too many fluid encounters - stopping module");
                         inRTPRecovery = false;
+                        miningDownInitiated = false;
                         toggle();
                     }
                 } else {
                     // RTP not enabled, can't escape
                     error("Hit fluids while mining down - cannot continue without RTP enabled");
                     inRTPRecovery = false;
+                    miningDownInitiated = false;
                     toggle();
                 }
 
@@ -1227,9 +1269,26 @@ public class BStar extends Module {
             }
         }
 
-        // Keep mining down
+        // Always ensure keys are pressed for mining down
         setPressed(mc.options.attackKey, true);
         setPressed(mc.options.sneakKey, true);
+
+        // Extra insurance - if we're not moving down after 2 seconds, try toggling again
+        if (miningDownToggleTicks > 40 && miningDownToggleTicks % 40 == 0) {
+            Vec3d currentPos = mc.player.getPos();
+            if (lastPos != null && Math.abs(currentPos.y - lastPos.y) < 0.5) {
+                if (debugMode.get()) {
+                    warning("Not moving down - retoggling mining keys");
+                }
+
+                // Force retoggle
+                stopMovement();
+                setPressed(mc.options.sneakKey, false);
+                setPressed(mc.options.attackKey, false);
+                miningDownToggleTicks = 0;
+            }
+            lastPos = currentPos;
+        }
     }
 
     private boolean scanGroundBelow() {
