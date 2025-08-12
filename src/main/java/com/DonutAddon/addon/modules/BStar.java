@@ -13,6 +13,7 @@ import net.minecraft.block.BlockState;
 import net.minecraft.block.Blocks;
 import net.minecraft.block.entity.*;
 import net.minecraft.client.option.KeyBinding;
+import net.minecraft.entity.player.PlayerEntity;
 import net.minecraft.fluid.Fluids;
 import net.minecraft.item.ItemStack;
 import net.minecraft.item.MiningToolItem;
@@ -384,6 +385,7 @@ public class BStar extends Module {
     // Debug tracking
     private int tickCounter = 0;
     private long moduleStartTime = 0;
+    private int playerCheckTicks = 0;
 
     private long lastRtpTime = 0;
     private int rtpWaitTicks = 0;
@@ -541,6 +543,31 @@ public class BStar extends Module {
             } else {
                 error("RTP failed after 3 attempts - stopping module");
                 toggle();
+            }
+        }
+    }
+    private void checkForPlayers() {
+        if (!detectPlayers.get() || mc.world == null || mc.player == null) return;
+
+        for (PlayerEntity player : mc.world.getPlayers()) {
+            if (player == mc.player) continue; // Skip self
+
+            double distance = player.distanceTo(mc.player);
+
+            if (distance <= 128) { // Within render distance
+                String playerName = player.getName().getString();
+
+                // Disconnect with custom message
+                String message = "Player " + playerName + " found in render distance";
+                error(message);
+
+                if (disconnectOnBaseFind.get()) {
+                    mc.player.networkHandler.onDisconnect(
+                        new DisconnectS2CPacket(Text.literal(message))
+                    );
+                    toggle();
+                }
+                break;
             }
         }
     }
@@ -769,6 +796,14 @@ public class BStar extends Module {
             return;
         }
         rotationController.update();
+
+        if (detectPlayers.get()) {
+            playerCheckTicks++;
+            if (playerCheckTicks >= playerCheckInterval.get()) {
+                playerCheckTicks = 0;
+                checkForPlayers();
+            }
+        }
         // MOVED THIS CHECK AFTER EATING CHECK AND ADDED RTP STATE CHECK
         if (pauseForAutoEat.get()) {
             AutoEat autoEat = Modules.get().get(AutoEat.class);
