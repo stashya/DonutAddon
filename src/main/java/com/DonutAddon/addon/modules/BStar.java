@@ -480,6 +480,10 @@ public class BStar extends Module {
     private static final int TARGET_DEPTH_WAIT_DURATION = 30; // 1.5 seconds (30 ticks)
     private boolean waitingAtTargetDepth = false;
 
+    private BlockPos moveAndRetryTarget = null;
+    private int moveAndRetryTicks = 0;
+    private static final int MOVE_RETRY_DURATION = 20;
+
     // Stash detection
     private final Set<ChunkPos> processedChunks = new HashSet<>();
 
@@ -921,17 +925,31 @@ public class BStar extends Module {
         // Check if we need to rotate
         if (dirToWaypoint != null) {
             float currentYaw = mc.player.getYaw();
+            float currentPitch = mc.player.getPitch();
             float targetYaw = directionToYaw(dirToWaypoint);
             float yawDiff = Math.abs(MathHelper.wrapDegrees(currentYaw - targetYaw));
 
-            if (yawDiff > 15) {
+            // FIX: Also check if pitch needs to be reset (if looking down/up)
+            boolean needsPitchReset = Math.abs(currentPitch) > 10.0f; // More than 10 degrees off horizontal
+
+            if (yawDiff > 15 || needsPitchReset) {
                 stopMovement();
 
                 if (debugMode.get()) {
-                    info("Rotating to face waypoint (diff: " + String.format("%.1f", yawDiff) + " degrees)");
+                    if (needsPitchReset && yawDiff <= 15) {
+                        info("Resetting view to horizontal (was looking at " +
+                            String.format("%.1f", currentPitch) + " degrees)");
+                    } else if (needsPitchReset) {
+                        info("Rotating to face waypoint and resetting pitch (yaw diff: " +
+                            String.format("%.1f", yawDiff) + ", pitch: " +
+                            String.format("%.1f", currentPitch) + ")");
+                    } else {
+                        info("Rotating to face waypoint (diff: " + String.format("%.1f", yawDiff) + " degrees)");
+                    }
                 }
 
                 currentState = MiningState.ROTATING;
+                // Always rotate to 0 pitch when moving horizontally
                 rotationController.startRotation(targetYaw, 0.0f, () -> {
                     currentState = MiningState.MOVING_TO_MINEDOWN;
                     if (debugMode.get()) {
@@ -1190,6 +1208,8 @@ public class BStar extends Module {
         searchingForSafeMineSpot = false;
         searchAttempts = 0;
         waitingAtTargetDepth = false;
+        moveAndRetryTarget = null;
+        moveAndRetryTicks = 0;
 
         synchronized (hazardBlocks) {
             hazardBlocks.clear();
@@ -1392,8 +1412,18 @@ public class BStar extends Module {
         }
 
         // Skip stuck detection during mining down or RTP states
-        if (!isInRTPState()) {
-            SafetyValidator.StuckRecoveryAction recoveryAction = safetyValidator.checkAndHandleStuck(mc.player);
+        if (!isInRTPState() || currentState == MiningState.MOVING_TO_MINEDOWN) {
+            // Determine current mining mode
+            SafetyValidator.MiningMode currentMode = SafetyValidator.MiningMode.NORMAL;
+
+            if (currentState == MiningState.MINING_DOWN) {
+                currentMode = SafetyValidator.MiningMode.MINING_DOWN;
+            } else if (currentState == MiningState.MOVING_TO_MINEDOWN ||
+                currentState == MiningState.FOLLOWING_DETOUR) {
+                currentMode = SafetyValidator.MiningMode.MOVING_TO_TARGET;
+            }
+
+            SafetyValidator.StuckRecoveryAction recoveryAction = safetyValidator.checkAndHandleStuck(mc.player, currentMode);
 
             switch (recoveryAction) {
                 case JUMPED:
@@ -1401,89 +1431,52 @@ public class BStar extends Module {
                     if (debugMode.get()) {
                         info("Stuck detected - attempted jump recovery");
                     }
-                    // Continue with current state but pause movement briefly
                     stopMovement();
                     return; // Skip this tick to let jump take effect
 
+                case RETOGGLE_KEYS:
+                    // Mining down stuck - retoggle keys
+                    if (debugMode.get()) {
+                        info("Mining down stuck - retoggling keys");
+                    }
+                    handleRetoggleKeys();
+                    return;
+
+                case MOVE_AND_RETRY:
+                    // Mining down stuck - move horizontally then retry
+                    if (debugMode.get()) {
+                        info("Mining down stuck - moving horizontally and retrying");
+                    }
+                    handleMoveAndRetry();
+                    return;
+
+                case FIND_NEW_SPOT:
+                    // Current spot failed - find new one
+                    if (debugMode.get()) {
+                        warning("Current position failed - searching for new safe spot");
+                    }
+                    handleFindNewSpot();
+                    return;
+
+                case RECALCULATE_PATH:
+                    // Path blocked - recalculate
+                    if (debugMode.get()) {
+                        info("Path blocked - recalculating route");
+                    }
+                    handleRecalculatePath();
+                    return;
+
                 case NEEDS_RESET:
-                    // Second attempt - reset module state
+                    // Final attempt - reset module state
                     if (debugMode.get()) {
-                        warning("Jump didn't resolve stuck state - resetting module logic");
+                        warning("All recovery attempts failed - resetting module logic");
                     }
-
-                    // Stop all current actions
-                    stopMovement();
-
-                    // Clear any ongoing operations
-                    currentWaypoint = null;
-                    lastHazardDetected = null;
-                    pendingDirection = null;
-                    isDetouring = false;
-
-                    // Clear visual indicators
-                    synchronized (hazardBlocks) {
-                        hazardBlocks.clear();
-                    }
-                    synchronized (waypointBlocks) {
-                        waypointBlocks.clear();
-                    }
-
-                    // Reset pathfinding components - CHECK FOR NULL AND PRIMARY DIRECTION
-                    if (pathfinder != null && pathfinder.getPrimaryDirection() != null) {
-                        pathfinder.completeDetour();
-                    }
-
-                    // Reset to centering state to recalculate everything
-                    currentState = MiningState.CENTERING;
-                    blocksMined = 0;
-                    scanTicks = 0;
-
-                    // Acknowledge the reset to the safety validator
-                    safetyValidator.acknowledgeReset();
-
-                    if (debugMode.get()) {
-                        info("Module state reset - starting fresh from centering");
-                    }
-                    return; // Skip this tick to let reset take effect
+                    handleModuleReset();
+                    return;
 
                 case NONE:
                     // Not stuck, continue normally
                     break;
-            }
-
-            // Also add a periodic movement check as a backup
-            // This runs every 2 seconds to catch edge cases
-            if (tickCounter % 40 == 0 && currentState == MiningState.MINING_PRIMARY) {
-                Vec3d currentPos = mc.player.getPos();
-                double distanceFromLastCheck = currentPos.distanceTo(lastPos);
-
-                if (distanceFromLastCheck < 0.1) {
-                    // Haven't moved much in 2 seconds while mining
-                    if (debugMode.get()) {
-                        warning("No movement detected while mining - possible stuck on corner");
-                    }
-
-                    // Try a quick rotation adjustment to unstick from corners
-                    float currentYaw = mc.player.getYaw();
-                    Direction currentDir = getCardinalDirection(currentYaw);
-                    float targetYaw = directionToYaw(currentDir);
-
-                    // If we're slightly off angle (due to overshoot), correct it
-                    float yawDiff = Math.abs(MathHelper.wrapDegrees(currentYaw - targetYaw));
-                    if (yawDiff > 2.0f) {
-                        if (debugMode.get()) {
-                            info("Correcting rotation drift: " + yawDiff + " degrees off");
-                        }
-
-                        stopMovement();
-                        currentState = MiningState.ROTATING;
-                        rotationController.setPreciseLanding(true); // Ensure precise landing for correction
-                        rotationController.startRotation(targetYaw, 0.0f, () -> {
-                            rotationController.setPreciseLanding(false); // Return to normal after correction
-                            currentState = MiningState.SCANNING_PRIMARY;
-                        });
-                    }
-                }
             }
         }
 
@@ -1586,7 +1579,240 @@ public class BStar extends Module {
             toggle();
         }
     }
+    private void handleRetoggleKeys() {
+        // Stop all keys
+        stopMovement();
+        setPressed(mc.options.sneakKey, false);
+        setPressed(mc.options.attackKey, false);
 
+        // Reset the mining down initiated flag to force retoggle
+        miningDownInitiated = false;
+        miningDownToggleTicks = 0;
+
+        if (debugMode.get()) {
+            info("Keys retoggled - resuming mining down");
+        }
+    }
+    private void handleMoveAndRetry() {
+        // Stop mining down temporarily
+        stopMovement();
+        setPressed(mc.options.sneakKey, false);
+        setPressed(mc.options.attackKey, false);
+
+        // Pick a random horizontal direction to move
+        if (moveAndRetryTarget == null) {
+            BlockPos currentPos = mc.player.getBlockPos();
+            Direction[] horizontalDirs = {Direction.NORTH, Direction.SOUTH, Direction.EAST, Direction.WEST};
+            Direction moveDir = horizontalDirs[(int)(Math.random() * 4)];
+            moveAndRetryTarget = currentPos.offset(moveDir);
+            moveAndRetryTicks = 0;
+
+            if (debugMode.get()) {
+                info("Moving " + moveDir.getName() + " to unstick from mining down");
+            }
+        }
+
+        // Move toward the target
+        moveAndRetryTicks++;
+
+        if (moveAndRetryTicks < MOVE_RETRY_DURATION) {
+            // Calculate direction and move
+            Direction dirToTarget = getDirectionToward(mc.player.getBlockPos(), moveAndRetryTarget);
+            if (dirToTarget != null) {
+                float targetYaw = directionToYaw(dirToTarget);
+                float currentYaw = mc.player.getYaw();
+                float yawDiff = Math.abs(MathHelper.wrapDegrees(currentYaw - targetYaw));
+
+                if (yawDiff < 15) {
+                    // Face the right direction, move forward
+                    setPressed(mc.options.forwardKey, true);
+                } else {
+                    // Need to rotate first
+                    stopMovement();
+                    currentState = MiningState.ROTATING;
+                    rotationController.startRotation(targetYaw, 0.0f, () -> {
+                        // After rotation, go back to current state
+                        currentState = MiningState.MINING_DOWN;
+                    });
+                }
+            }
+        } else {
+            // Done moving, reset and go back to mining down
+            moveAndRetryTarget = null;
+            moveAndRetryTicks = 0;
+            miningDownInitiated = false; // Force reinit of mining down
+
+            if (debugMode.get()) {
+                info("Horizontal movement complete, resuming mining down");
+            }
+        }
+    }
+
+    private void handleFindNewSpot() {
+        // Stop current action
+        stopMovement();
+        setPressed(mc.options.sneakKey, false);
+        setPressed(mc.options.attackKey, false);
+
+        // Clear current targets
+        safeMineDownTarget = null;
+        currentWaypoint = null;
+
+        // Reset mining down state
+        miningDownInitiated = false;
+        miningDownToggleTicks = 0;
+        safetyValidator.resetMiningDown();
+
+        if (currentState == MiningState.MINING_DOWN) {
+            // If we were mining down, search for new safe spot
+            currentState = MiningState.SEARCHING_SAFE_MINEDOWN;
+            searchAttempts = 0; // Reset search attempts for new search
+
+            if (debugMode.get()) {
+                info("Mining down failed at current spot - searching for new safe location");
+            }
+        } else if (currentState == MiningState.MOVING_TO_MINEDOWN) {
+            // If we were moving to a spot, abandon it and search for new one
+            if (pathfinder != null && pathfinder.currentDetour != null) {
+                pathfinder.currentDetour.clear();
+                pathfinder.isDetouring = false;
+            }
+
+            synchronized (waypointBlocks) {
+                waypointBlocks.clear();
+            }
+
+            currentState = MiningState.SEARCHING_SAFE_MINEDOWN;
+            searchAttempts++;
+
+            if (debugMode.get()) {
+                info("Failed to reach mine-down spot - searching for alternative");
+            }
+        }
+    }
+
+    private void handleRecalculatePath() {
+        // Stop movement
+        stopMovement();
+
+        // Clear current waypoint
+        currentWaypoint = null;
+
+        if (currentState == MiningState.MOVING_TO_MINEDOWN && safeMineDownTarget != null) {
+            // Recalculate path to the same target
+            BlockPos playerPos = mc.player.getBlockPos();
+
+            if (debugMode.get()) {
+                info("Recalculating path to mine-down target");
+            }
+
+            // Check if target is still reachable
+            if (isPositionReachable(playerPos, safeMineDownTarget)) {
+                // Create new path
+                List<BlockPos> waypoints = createPathToMineDown(playerPos, safeMineDownTarget);
+
+                if (!waypoints.isEmpty()) {
+                    Queue<BlockPos> waypointQueue = new LinkedList<>(waypoints);
+                    pathfinder.currentDetour = new LinkedList<>(waypointQueue);
+                    pathfinder.isDetouring = true;
+
+                    currentWaypoint = pathfinder.getNextWaypoint();
+
+                    if (debugMode.get()) {
+                        info("New path calculated with " + waypoints.size() + " waypoints");
+                    }
+
+                    // Update visual waypoints
+                    if (showWaypoints.get()) {
+                        synchronized (waypointBlocks) {
+                            waypointBlocks.clear();
+                            waypointBlocks.addAll(waypoints);
+                        }
+                    }
+                } else {
+                    // Can't create path, find new spot
+                    handleFindNewSpot();
+                }
+            } else {
+                // Target no longer reachable, find new spot
+                if (debugMode.get()) {
+                    warning("Mine-down target no longer reachable - finding new spot");
+                }
+                handleFindNewSpot();
+            }
+        } else if (currentState == MiningState.FOLLOWING_DETOUR) {
+            // Recalculate detour
+            if (pathfinder != null) {
+                pathfinder.completeDetour();
+            }
+
+            synchronized (waypointBlocks) {
+                waypointBlocks.clear();
+            }
+
+            currentState = MiningState.CALCULATING_DETOUR;
+
+            if (debugMode.get()) {
+                info("Recalculating detour path");
+            }
+        }
+    }
+
+    private void handleModuleReset() {
+        // Stop all current actions
+        stopMovement();
+        setPressed(mc.options.sneakKey, false);
+        setPressed(mc.options.attackKey, false);
+
+        // Clear any ongoing operations
+        currentWaypoint = null;
+        lastHazardDetected = null;
+        pendingDirection = null;
+        isDetouring = false;
+        moveAndRetryTarget = null;
+        moveAndRetryTicks = 0;
+
+        // Clear visual indicators
+        synchronized (hazardBlocks) {
+            hazardBlocks.clear();
+        }
+        synchronized (waypointBlocks) {
+            waypointBlocks.clear();
+        }
+
+        // Reset pathfinding components
+        if (pathfinder != null && pathfinder.getPrimaryDirection() != null) {
+            pathfinder.completeDetour();
+        }
+
+        // Reset mining down state if applicable
+        if (inRTPRecovery || currentState == MiningState.MINING_DOWN) {
+            miningDownInitiated = false;
+            miningDownToggleTicks = 0;
+            safetyValidator.resetMiningDown();
+
+            // Don't exit RTP recovery mode if we're still above target
+            if (mc.player.getY() > mineDownTarget.get()) {
+                currentState = MiningState.RTP_SCANNING_GROUND;
+            } else {
+                inRTPRecovery = false;
+                currentState = MiningState.CENTERING;
+            }
+        } else {
+            // Normal reset to centering
+            currentState = MiningState.CENTERING;
+        }
+
+        blocksMined = 0;
+        scanTicks = 0;
+
+        // Acknowledge the reset to the safety validator
+        safetyValidator.acknowledgeReset();
+
+        if (debugMode.get()) {
+            info("Module state fully reset - starting fresh");
+        }
+    }
     private void handleCentering() {
         if (!centeringHelper.isCentering()) {
             if (!centeringHelper.startCentering()) {
