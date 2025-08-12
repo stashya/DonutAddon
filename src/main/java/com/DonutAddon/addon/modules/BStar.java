@@ -377,7 +377,7 @@ public class BStar extends Module {
     );
 
     private final Setting<Boolean> alwaysFocused = sgGeneral.add(new BoolSetting.Builder()
-        .name("always-focused")
+        .name("work-in-background")
         .description("Makes Minecraft think it's always focused, allowing mining while alt-tabbed.")
         .defaultValue(false)
         .build()
