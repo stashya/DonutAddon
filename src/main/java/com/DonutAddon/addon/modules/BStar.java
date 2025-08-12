@@ -376,6 +376,18 @@ public class BStar extends Module {
         .build()
     );
 
+    private final Setting<Boolean> alwaysFocused = sgGeneral.add(new BoolSetting.Builder()
+        .name("always-focused")
+        .description("Makes Minecraft think it's always focused, allowing mining while alt-tabbed.")
+        .defaultValue(false)
+        .build()
+    );
+
+    // Add a public getter method so the mixin can access it
+    public boolean isAlwaysFocused() {
+        return isActive() && alwaysFocused.get();
+    }
+
 
     private void setPressed(KeyBinding key, boolean pressed) {
         key.setPressed(pressed);
@@ -570,102 +582,58 @@ public class BStar extends Module {
         }
     }
 
-    private static class MineDownCandidate {
-        final BlockPos position;
-        final double distance;
-        final boolean reachable;
-
-        MineDownCandidate(BlockPos position, double distance, boolean reachable) {
-            this.position = position;
-            this.distance = distance;
-            this.reachable = reachable;
-        }
-    }
 
     private BlockPos findSafeMineDownSpot(BlockPos playerPos) {
         if (debugMode.get()) {
             info("Searching for safe mine-down spot within " + safeMineDownSearchRadius.get() + " blocks...");
         }
 
-        List<MineDownCandidate> candidates = new ArrayList<>();
         int searchRadius = safeMineDownSearchRadius.get();
-        int blocksChecked = 0;
-        int maxChecks = 100; // Limit total checks for performance
+        int positionsChecked = 0;
 
-        // Use spiral search pattern - start close, expand outward
-        for (int radius = 2; radius <= searchRadius; radius += 2) { // Check every 2 blocks for efficiency
+        // Search in expanding rings - no candidate limit, just radius limit
+        for (int radius = 2; radius <= searchRadius; radius++) {
             List<BlockPos> ringPositions = getSpiralRing(playerPos, radius);
 
+            if (debugMode.get() && radius % 3 == 0) {
+                System.out.println("Searching ring at radius " + radius + " (" + ringPositions.size() + " positions)");
+            }
+
             for (BlockPos checkPos : ringPositions) {
-                if (blocksChecked >= maxChecks) {
-                    break; // Resource optimization
-                }
-                blocksChecked++;
+                positionsChecked++;
 
                 // Only check positions at the same Y level
                 if (checkPos.getY() != playerPos.getY()) {
                     continue;
                 }
 
-                // Check if this position has safe ground below
-                if (scanGroundBelowAt(checkPos)) {
+                // First check if we can reach this position
+                if (!isPositionReachable(playerPos, checkPos)) {
+                    continue; // Can't get there safely
+                }
+
+                // Then check if we can mine down from this position
+                // This uses FULL area scanning and predictive checks
+                if (canSafelyMineDownFrom(checkPos)) {
                     double distance = Math.sqrt(
                         Math.pow(checkPos.getX() - playerPos.getX(), 2) +
                             Math.pow(checkPos.getZ() - playerPos.getZ(), 2)
                     );
 
-                    // Early exit if we found a very close spot
-                    if (distance <= 5) {
-                        if (debugMode.get()) {
-                            info("Found close safe spot at distance " + String.format("%.1f", distance));
-                        }
-
-                        // Quick reachability check for close spots
-                        if (isPositionReachable(playerPos, checkPos)) {
-                            return checkPos;
-                        }
+                    if (debugMode.get()) {
+                        info("Found safe mine-down spot at " + checkPos +
+                            " (distance: " + String.format("%.1f", distance) +
+                            " blocks, checked " + positionsChecked + " positions)");
                     }
 
-                    // Add to candidates for later evaluation
-                    candidates.add(new MineDownCandidate(checkPos, distance, false));
+                    return checkPos;
                 }
-            }
-
-            // If we have some candidates, stop expanding search
-            if (candidates.size() >= 3) {
-                break;
-            }
-        }
-
-        if (candidates.isEmpty()) {
-            if (debugMode.get()) {
-                warning("No safe mine-down spots found in " + blocksChecked + " checked positions");
-            }
-            return null;
-        }
-
-        // Sort by distance
-        candidates.sort(Comparator.comparingDouble(c -> c.distance));
-
-        if (debugMode.get()) {
-            info("Found " + candidates.size() + " potential safe spots, checking reachability...");
-        }
-
-        // Check reachability for top candidates
-        for (int i = 0; i < Math.min(candidates.size(), MAX_SEARCH_ATTEMPTS); i++) {
-            MineDownCandidate candidate = candidates.get(i);
-
-            if (isPositionReachable(playerPos, candidate.position)) {
-                if (debugMode.get()) {
-                    info("Safe mine-down spot found at " + candidate.position +
-                        " (distance: " + String.format("%.1f", candidate.distance) + " blocks)");
-                }
-                return candidate.position;
             }
         }
 
         if (debugMode.get()) {
-            warning("Found " + candidates.size() + " safe spots but none are reachable");
+            warning("No safe mine-down spots found after checking " + positionsChecked +
+                " positions within radius " + searchRadius);
         }
 
         return null;
@@ -691,30 +659,19 @@ public class BStar extends Module {
         return positions;
     }
 
-    // 7. Method to scan ground below at a specific position:
-    private boolean scanGroundBelowAt(BlockPos checkPos) {
-        GroundHazard hazard = scanGroundBelowDetailed(checkPos);
-        return hazard == GroundHazard.NONE;
-    }
 
     // 8. Method to check if a position is reachable:
     private boolean isPositionReachable(BlockPos from, BlockPos to) {
-        // Calculate direction to target
+        // Calculate path segments
         int dx = to.getX() - from.getX();
         int dz = to.getZ() - from.getZ();
 
-        // We need to check if we can path to this position
-        // Use existing PathScanner to validate the path
-
-        // Break path into segments
-        int steps = Math.max(Math.abs(dx), Math.abs(dz));
-
-        if (steps == 0) {
+        if (dx == 0 && dz == 0) {
             return true; // Already there
         }
 
-        // Check path in straight lines (Manhattan distance style)
-        // First move in X direction, then Z
+        // Try X-first path
+        boolean xFirstValid = true;
         if (dx != 0) {
             Direction xDir = dx > 0 ? Direction.EAST : Direction.WEST;
             PathScanner.ScanResult xScan = pathScanner.scanDirection(
@@ -722,37 +679,23 @@ public class BStar extends Module {
             );
 
             if (!xScan.isSafe()) {
-                // Try Z first instead
-                if (dz != 0) {
-                    Direction zDir = dz > 0 ? Direction.SOUTH : Direction.NORTH;
-                    PathScanner.ScanResult zScan = pathScanner.scanDirection(
-                        from, zDir, Math.abs(dz), scanHeight.get(), false
-                    );
+                xFirstValid = false;
 
-                    if (!zScan.isSafe()) {
-                        return false; // Can't reach via simple paths
-                    }
-
-                    // Check X from new position
-                    BlockPos midPoint = from.offset(zDir, Math.abs(dz));
-                    PathScanner.ScanResult xScan2 = pathScanner.scanDirection(
-                        midPoint, xDir, Math.abs(dx), scanHeight.get(), false
-                    );
-
-                    return xScan2.isSafe();
+                if (debugMode.get()) {
+                    System.out.println("X-first path blocked by " + xScan.getHazardType() +
+                        " at distance " + xScan.getHazardDistance());
                 }
-                return false;
-            }
-
-            // Check Z from new position if needed
-            if (dz != 0) {
+            } else if (dz != 0) {
+                // Check Z segment from intermediate position
                 BlockPos midPoint = from.offset(xDir, Math.abs(dx));
                 Direction zDir = dz > 0 ? Direction.SOUTH : Direction.NORTH;
                 PathScanner.ScanResult zScan = pathScanner.scanDirection(
                     midPoint, zDir, Math.abs(dz), scanHeight.get(), false
                 );
 
-                return zScan.isSafe();
+                if (!zScan.isSafe()) {
+                    xFirstValid = false;
+                }
             }
         } else if (dz != 0) {
             // Only Z movement needed
@@ -761,10 +704,39 @@ public class BStar extends Module {
                 from, zDir, Math.abs(dz), scanHeight.get(), false
             );
 
-            return zScan.isSafe();
+            xFirstValid = zScan.isSafe();
         }
 
-        return true;
+        if (xFirstValid) {
+            return true;
+        }
+
+        // Try Z-first path if X-first failed
+        if (dz != 0) {
+            Direction zDir = dz > 0 ? Direction.SOUTH : Direction.NORTH;
+            PathScanner.ScanResult zScan = pathScanner.scanDirection(
+                from, zDir, Math.abs(dz), scanHeight.get(), false
+            );
+
+            if (!zScan.isSafe()) {
+                return false;
+            }
+
+            if (dx != 0) {
+                // Check X segment from intermediate position
+                BlockPos midPoint = from.offset(zDir, Math.abs(dz));
+                Direction xDir = dx > 0 ? Direction.EAST : Direction.WEST;
+                PathScanner.ScanResult xScan = pathScanner.scanDirection(
+                    midPoint, xDir, Math.abs(dx), scanHeight.get(), false
+                );
+
+                return xScan.isSafe();
+            }
+
+            return true;
+        }
+
+        return false;
     }
 
     // 9. Handler for the new SEARCHING_SAFE_MINEDOWN state:
@@ -778,7 +750,7 @@ public class BStar extends Module {
         BlockPos safeSpot = findSafeMineDownSpot(playerPos);
 
         if (safeSpot != null) {
-            // Found a safe spot, create waypoints to reach it
+            // Found a safe spot that passed BOTH path and mine-down validation
             safeMineDownTarget = safeSpot;
 
             // Create path to safe spot
@@ -805,20 +777,77 @@ public class BStar extends Module {
                     }
                 }
             } else {
+                // This shouldn't happen since we validated reachability
                 if (debugMode.get()) {
-                    error("Failed to create path to safe spot");
+                    error("Failed to create path to validated safe spot - this shouldn't happen!");
                 }
-                resumeRTPLogic();
+                initiateRTPFallback();
             }
         } else {
-            // No safe spot found, continue with RTP
+            // No safe spot found within search radius - don't wander, just RTP
             if (debugMode.get()) {
-                warning("No reachable safe mine-down spots found, continuing with RTP");
+                warning("No safe mine-down spots found within " + safeMineDownSearchRadius.get() +
+                    " blocks. Initiating RTP to find better location.");
             }
-            resumeRTPLogic();
+            initiateRTPFallback();
+        }
+    }
+    private void initiateRTPFallback() {
+        searchAttempts = 0;
+        safeMineDownTarget = null;
+        mineDownCandidates.clear();
+
+        if (rtpWhenStuck.get()) {
+            rtpAttempts++;
+            if (rtpAttempts < 5) {
+                if (debugMode.get()) {
+                    info("Attempting RTP to find better location (attempt " + rtpAttempts + "/5)");
+                }
+                initiateRTP();
+            } else {
+                error("Failed to find safe mining location after 5 RTP attempts");
+                toggle();
+            }
+        } else {
+            error("Cannot find safe mine-down location and RTP is disabled");
+            toggle();
         }
     }
 
+    private boolean canSafelyMineDownFrom(BlockPos checkPos) {
+        // Use EXACT same validation as handleMiningDown()
+
+        // 1. Check current position with full area scan
+        GroundHazard currentHazard = scanGroundBelowDetailed(checkPos);
+        if (currentHazard != GroundHazard.NONE) {
+            if (debugMode.get()) {
+                System.out.println("Position " + checkPos + " failed current ground scan: " + currentHazard);
+            }
+            return false;
+        }
+
+        // 2. Predictive scan - check 5 blocks below (same as handleMiningDown)
+        BlockPos predictivePos = checkPos.down(5);
+        GroundHazard predictiveHazard = scanGroundBelowDetailed(predictivePos);
+        if (predictiveHazard != GroundHazard.NONE) {
+            if (debugMode.get()) {
+                System.out.println("Position " + checkPos + " failed predictive scan at Y=" + predictivePos.getY() + ": " + predictiveHazard);
+            }
+            return false;
+        }
+
+        // 3. Additional deeper predictive check for extra safety
+        BlockPos deepPredictivePos = checkPos.down(8);
+        GroundHazard deepHazard = scanGroundBelowDetailed(deepPredictivePos);
+        if (deepHazard != GroundHazard.NONE) {
+            if (debugMode.get()) {
+                System.out.println("Position " + checkPos + " failed deep predictive scan: " + deepHazard);
+            }
+            return false;
+        }
+
+        return true;
+    }
     // 10. Create path to mine-down spot:
     private List<BlockPos> createPathToMineDown(BlockPos from, BlockPos to) {
         List<BlockPos> waypoints = new ArrayList<>();
@@ -854,7 +883,7 @@ public class BStar extends Module {
 
         // If we're currently rotating, don't do anything else
         if (rotationController.isRotating()) {
-            stopMovement(); // Ensure we're not mining while rotating
+            stopMovement();
             return;
         }
 
@@ -868,7 +897,7 @@ public class BStar extends Module {
                     info("Reached safe mine-down location, preparing to center and mine down");
                 }
 
-                // Clear the detour manually
+                // Clear the detour
                 if (pathfinder != null && pathfinder.currentDetour != null) {
                     pathfinder.currentDetour.clear();
                     pathfinder.isDetouring = false;
@@ -889,14 +918,13 @@ public class BStar extends Module {
         // Calculate direction to waypoint
         Direction dirToWaypoint = getDirectionToward(playerPos, currentWaypoint);
 
-        // Check if we need to rotate FIRST before checking parkour or mining
+        // Check if we need to rotate
         if (dirToWaypoint != null) {
             float currentYaw = mc.player.getYaw();
             float targetYaw = directionToYaw(dirToWaypoint);
             float yawDiff = Math.abs(MathHelper.wrapDegrees(currentYaw - targetYaw));
 
             if (yawDiff > 15) {
-                // Need to rotate - stop everything and rotate
                 stopMovement();
 
                 if (debugMode.get()) {
@@ -905,16 +933,13 @@ public class BStar extends Module {
 
                 currentState = MiningState.ROTATING;
                 rotationController.startRotation(targetYaw, 0.0f, () -> {
-                    // After rotation completes, go back to moving
                     currentState = MiningState.MOVING_TO_MINEDOWN;
                     if (debugMode.get()) {
                         info("Rotation complete, resuming movement to mine-down spot");
                     }
                 });
-                return; // Don't do anything else this tick
+                return;
             }
-
-            // We're facing the right direction, now check for obstacles
 
             // Check for parkour opportunities
             if (!parkourHelper.isJumping()) {
@@ -924,7 +949,7 @@ public class BStar extends Module {
                         info("Jumping over obstacle while moving to mine-down spot: " + jumpCheck.reason);
                     }
                     if (parkourHelper.startJump(jumpCheck.targetPos)) {
-                        startMining(); // Can mine while jumping since we're facing the right way
+                        startMining();
                         return;
                     }
                 }
@@ -945,9 +970,8 @@ public class BStar extends Module {
             return;
         }
 
-        // Only mine if we're facing the right direction and not rotating
+        // Mine toward waypoint if facing the right direction
         if (dirToWaypoint != null && !rotationController.isRotating()) {
-            // Mine toward waypoint
             startMining();
             lastPos = mc.player.getPos();
 
@@ -957,7 +981,7 @@ public class BStar extends Module {
                 scanTicks = 0;
 
                 PathScanner.ScanResult quickScan = pathScanner.scanDirection(
-                    playerPos, dirToWaypoint, 3, 4, false
+                    playerPos, dirToWaypoint, 3, scanHeight.get(), false
                 );
 
                 if (!quickScan.isSafe() && quickScan.getHazardDistance() <= 2) {
@@ -968,6 +992,7 @@ public class BStar extends Module {
                     stopMovement();
                     currentWaypoint = null;
 
+                    // Clear current path and search for new safe spot
                     if (pathfinder != null && pathfinder.currentDetour != null) {
                         pathfinder.currentDetour.clear();
                         pathfinder.isDetouring = false;
@@ -983,28 +1008,6 @@ public class BStar extends Module {
     }
 
     // 12. Helper method to resume RTP logic when safe spot search fails:
-    private void resumeRTPLogic() {
-        searchAttempts = 0;
-        safeMineDownTarget = null;
-        mineDownCandidates.clear();
-
-        // Continue with RTP attempts
-        if (rtpWhenStuck.get()) {
-            rtpAttempts++;
-            if (rtpAttempts < 5) {
-                if (debugMode.get()) {
-                    info("Attempting RTP to find better location (attempt " + rtpAttempts + "/5)");
-                }
-                initiateRTP();
-            } else {
-                error("Failed to find safe mining location after 5 attempts");
-                toggle();
-            }
-        } else {
-            error("Cannot mine down - fluids detected and RTP disabled");
-            toggle();
-        }
-    }
 
     private void handleRTPInitiated() {
         rtpWaitTicks++;
