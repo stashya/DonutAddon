@@ -21,7 +21,7 @@ public class SafetyValidator {
     private static final int STUCK_THRESHOLD = 60; // Reduced from 140 to 60 ticks (3 seconds)
     private static final int JUMP_COOLDOWN_TICKS = 20; // Reduced from 40 to 20 ticks (1 second)
     private static final double MIN_DURABILITY_PERCENT = 0.10;
-    private static final double MOVEMENT_THRESHOLD = 0.01; // More sensitive stuck detection
+    private static final double MOVEMENT_THRESHOLD = 1; // More sensitive stuck detection
 
     // NEW: Track position history for better stuck detection
     private Vec3d positionHistory[] = new Vec3d[20]; // Track last second of positions
