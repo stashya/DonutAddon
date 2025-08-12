@@ -10,6 +10,7 @@ import meteordevelopment.meteorclient.utils.player.FindItemResult;
 import meteordevelopment.meteorclient.utils.player.InvUtils;
 import meteordevelopment.orbit.EventHandler;
 import net.minecraft.block.BlockState;
+import net.minecraft.block.Blocks;
 import net.minecraft.block.entity.*;
 import net.minecraft.client.option.KeyBinding;
 import net.minecraft.fluid.Fluids;
@@ -38,6 +39,7 @@ import net.minecraft.item.Items;
 import net.minecraft.world.World;
 import meteordevelopment.meteorclient.systems.modules.player.EXPThrower;
 import net.minecraft.item.Items;
+import net.minecraft.world.chunk.Chunk;
 
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
@@ -322,6 +324,23 @@ public class BStar extends Module {
         .build()
     );
 
+    private final Setting<Boolean> detectPlayers = sgGeneral.add(new BoolSetting.Builder()
+        .name("detect-players")
+        .description("Disconnect when players are detected in render distance.")
+        .defaultValue(true)
+        .build()
+    );
+
+    private final Setting<Integer> playerCheckInterval = sgGeneral.add(new IntSetting.Builder()
+        .name("player-check-interval")
+        .description("How often to check for players (in ticks).")
+        .defaultValue(20)
+        .range(10, 60)
+        .sliderRange(10, 60)
+        .visible(detectPlayers::get)
+        .build()
+    );
+
 
     private void setPressed(KeyBinding key, boolean pressed) {
         key.setPressed(pressed);
@@ -337,6 +356,7 @@ public class BStar extends Module {
     private void startMining() {
         setPressed(mc.options.attackKey, true);
         setPressed(mc.options.forwardKey, true);
+        mc.player.swingHand(mc.player.getActiveHand());
     }
 
     // Module components
@@ -393,6 +413,7 @@ public class BStar extends Module {
     // Add this field to track if we've initiated mining down
     private boolean miningDownInitiated = false;
     private int miningDownToggleTicks = 0;
+
 
     // Stash detection
     private final Set<ChunkPos> processedChunks = new HashSet<>();
@@ -523,6 +544,42 @@ public class BStar extends Module {
             }
         }
     }
+
+    private int searchChunkForSpawnersOptimized(Chunk chunk) {
+        int foundSpawners = 0;
+        BlockPos.Mutable blockPos = new BlockPos.Mutable();
+
+        // For underground mining, we don't need to scan the entire height
+        // BlockESP uses heightmap, but we can be smarter for underground
+        int playerY = (int) mc.player.getY();
+
+        // Only scan if we're underground
+        if (playerY > 64) return 0; // Don't scan if above ground
+
+        int minY = Math.max(mc.world.getBottomY(), -64);
+        int maxY = Math.min(playerY + 20, 20); // Spawners rarely generate above Y=20
+
+        for (int x = chunk.getPos().getStartX(); x <= chunk.getPos().getEndX(); x++) {
+            for (int z = chunk.getPos().getStartZ(); z <= chunk.getPos().getEndZ(); z++) {
+                for (int y = minY; y <= maxY; y++) {
+                    blockPos.set(x, y, z);
+                    BlockState blockState = chunk.getBlockState(blockPos);
+
+                    if (blockState.getBlock() == Blocks.SPAWNER) {
+                        foundSpawners++;
+
+                        if (debugMode.get()) {
+                            info("Spawner Found, use BlockESP to see it");
+                        }
+
+                        return 1;
+                    }
+                }
+            }
+        }
+
+        return foundSpawners;
+    }
     private void handleRTPCooldown() {
         rtpWaitTicks++;
 
@@ -647,11 +704,12 @@ public class BStar extends Module {
         StashChunk chunk = new StashChunk(chunkPos);
         List<BlockEntityType<?>> selectedStorageBlocks = storageBlocks.get();
 
-        // Scan all block entities in the chunk
+        // Use BlockESP-style block scanning for spawners
+        chunk.spawners = searchChunkForSpawnersOptimized(event.chunk());
+
+        // Keep your existing block entity detection for storage blocks (this works fine)
         for (BlockEntity blockEntity : event.chunk().getBlockEntities().values()) {
-            if (blockEntity instanceof MobSpawnerBlockEntity) {
-                chunk.spawners++;
-            } else if (selectedStorageBlocks.contains(blockEntity.getType())) {
+            if (selectedStorageBlocks.contains(blockEntity.getType())) {
                 if (blockEntity instanceof ChestBlockEntity) {
                     chunk.chests++;
                 } else if (blockEntity instanceof BarrelBlockEntity) {
@@ -678,6 +736,10 @@ public class BStar extends Module {
         if (chunk.spawners > 0) {
             isBase = true;
             foundType = "spawners";
+
+            if (debugMode.get()) {
+                info("Found " + chunk.spawners + " spawner(s) in chunk [" + chunkPos.x + ", " + chunkPos.z + "]");
+            }
         } else if (totalStorageBlocks >= baseThreshold.get()) {
             isBase = true;
             foundType = "base";
