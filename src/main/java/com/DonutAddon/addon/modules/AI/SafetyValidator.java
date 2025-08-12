@@ -18,8 +18,8 @@ public class SafetyValidator {
     private boolean needsModuleReset = false;  // NEW: Flag for module reset
 
     // Adjusted thresholds for faster response
-    private static final int STUCK_THRESHOLD = 140; // Reduced from 140 to 60 ticks (3 seconds)
-    private static final int JUMP_COOLDOWN_TICKS = 40; // Reduced from 40 to 20 ticks (1 second)
+    private static final int STUCK_THRESHOLD = 60; // Reduced from 140 to 60 ticks (3 seconds)
+    private static final int JUMP_COOLDOWN_TICKS = 20; // Reduced from 40 to 20 ticks (1 second)
     private static final double MIN_DURABILITY_PERCENT = 0.10;
     private static final double MOVEMENT_THRESHOLD = 0.01; // More sensitive stuck detection
 
@@ -69,11 +69,11 @@ public class SafetyValidator {
             }
         }
 
-        // Check health
-        if (player.getHealth() < 10) {
-            System.out.println("WARNING: Low health (" + player.getHealth() + "), stopping");
-            return false;
-        }
+//        // Check health
+//        if (player.getHealth() < 4) {
+//            System.out.println("WARNING: Low health (" + player.getHealth() + "), stopping");
+//            return false;
+//        }
 
         // Check tool durability
         ItemStack mainHand = player.getMainHandStack();

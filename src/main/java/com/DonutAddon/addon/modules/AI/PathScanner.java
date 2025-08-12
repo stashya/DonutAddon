@@ -191,8 +191,8 @@ public class PathScanner {
         // Check for Pattern 1: Current position sandwich trap
         // (ceiling above us + block at foot level ahead + air at head level ahead)
         BlockPos ceilingPos = start.up(2);
-        BlockPos footAhead = start.offset(direction).down(); // Ground level ahead
-        BlockPos headAhead = start.offset(direction); // Head level ahead
+        BlockPos footAhead = start.offset(direction);        // Same Y as player feet
+        BlockPos headAhead = start.offset(direction).up();   // Same Y as player head (Y+1)
 
         if (!world.getBlockState(ceilingPos).isAir() &&        // Ceiling above us
             !world.getBlockState(footAhead).isAir() &&         // Block at foot level ahead
@@ -205,41 +205,56 @@ public class PathScanner {
             return new SandwichTrapResult(true, 1, footAhead);
         }
 
-        // Check for Pattern 2: Offset sandwich trap ahead
-        // (we're under a ceiling, and ahead has foot block but no head block)
-        for (int distance = 1; distance <= Math.min(maxDepth, 3); distance++) {
-            // Check if we currently have a ceiling (or will at distance-1)
-            BlockPos prevCeiling = start.offset(direction, distance - 1).up(2);
-            boolean hasCeilingBehind = !world.getBlockState(prevCeiling).isAir();
+        // Check for Pattern 2: Direct sandwich trap ahead
+        // (block at foot level ahead + air at head level ahead + ceiling above the air)
+        BlockPos footAheadP2 = start.offset(direction);          // Same Y as player feet
+        BlockPos headAheadP2 = start.offset(direction).up();     // Y+1 (head level)
+        BlockPos ceilingAheadP2 = start.offset(direction).up(2); // Ceiling level ahead
 
-            // Check the position ahead
-            BlockPos checkBase = start.offset(direction, distance).down(); // Ground level
-            BlockPos footPos = checkBase.up(); // Foot level (Y+0 from ground)
-            BlockPos headPos = footPos.up(); // Head level (Y+1 from ground)
+        if (!world.getBlockState(footAheadP2).isAir() &&       // Block at foot level ahead
+            world.getBlockState(headAheadP2).isAir() &&        // Air at head level ahead
+            !world.getBlockState(ceilingAheadP2).isAir()) {    // Ceiling above the air ahead
 
-            // Pattern 2: Ceiling behind/above + foot block ahead + air at head
-            if (hasCeilingBehind &&
-                !world.getBlockState(footPos).isAir() &&  // Block at foot level
-                world.getBlockState(headPos).isAir()) {    // Air at head level
+            System.out.println("DEBUG: Pattern 2 Sandwich Trap directly ahead!");
+            System.out.println("  Foot block at: " + footAheadP2);
+            System.out.println("  Air gap at: " + headAheadP2);
+            System.out.println("  Ceiling at: " + ceilingAheadP2);
+            return new SandwichTrapResult(true, 1, footAheadP2);
+        }
 
-                System.out.println("DEBUG: Pattern 2 Sandwich Trap at distance " + distance);
-                System.out.println("  Previous ceiling at: " + prevCeiling);
-                System.out.println("  Foot block at: " + footPos);
-                System.out.println("  Air gap at: " + headPos);
-                return new SandwichTrapResult(true, distance, footPos);
+        // Check for both sandwich trap patterns up to 8 blocks ahead
+        for (int distance = 2; distance <= Math.min(maxDepth, 8); distance++) {
+            BlockPos checkPos = start.offset(direction, distance);
+            BlockPos p1Ceiling = checkPos.up(2);                     // Y+2 - ceiling above position
+            BlockPos p1FootAhead = checkPos.offset(direction);       // Y+0 - foot level ahead
+            BlockPos p1HeadAhead = checkPos.offset(direction).up();
+
+            if (!world.getBlockState(p1Ceiling).isAir() &&
+                !world.getBlockState(p1FootAhead).isAir() &&
+                world.getBlockState(p1HeadAhead).isAir()) {
+
+                System.out.println("DEBUG: Forward Pattern 1 Sandwich Trap at distance " + distance);
+                System.out.println("  Position ceiling at: " + p1Ceiling);
+                System.out.println("  Foot block ahead at: " + p1FootAhead);
+                System.out.println("  Air gap ahead at: " + p1HeadAhead);
+                return new SandwichTrapResult(true, distance + 1, p1FootAhead);
             }
 
-            // Also check if there's a direct sandwich at this distance
-            BlockPos ceilingAhead = start.offset(direction, distance).up(2);
-            BlockPos nextFootPos = start.offset(direction, distance + 1).down();
-            BlockPos nextHeadPos = start.offset(direction, distance + 1);
+            // Pattern 2 check at this distance:
+            // (block at foot + air at head + ceiling above)
+            BlockPos p2Foot = checkPos;         // Y+0 - foot level at check position
+            BlockPos p2Head = checkPos.up();    // Y+1 - head level at check position
+            BlockPos p2Ceiling = checkPos.up(2); // Y+2 - ceiling above check position
 
-            if (!world.getBlockState(ceilingAhead).isAir() &&
-                !world.getBlockState(nextFootPos).isAir() &&
-                world.getBlockState(nextHeadPos).isAir()) {
+            if (!world.getBlockState(p2Foot).isAir() &&
+                world.getBlockState(p2Head).isAir() &&
+                !world.getBlockState(p2Ceiling).isAir()) {
 
-                System.out.println("DEBUG: Forward Sandwich Trap at distance " + (distance + 1));
-                return new SandwichTrapResult(true, distance + 1, nextFootPos);
+                System.out.println("DEBUG: Forward Pattern 2 Sandwich Trap at distance " + distance);
+                System.out.println("  Foot block at: " + p2Foot);
+                System.out.println("  Air gap at: " + p2Head);
+                System.out.println("  Ceiling at: " + p2Ceiling);
+                return new SandwichTrapResult(true, distance, p2Foot);
             }
         }
 

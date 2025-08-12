@@ -7,8 +7,8 @@ import java.util.*;
 public class DirectionalPathfinder {
     private Direction primaryDirection;
     private Direction originalPrimaryDirection;
-    private Queue<BlockPos> currentDetour = new LinkedList<>();
-    private boolean isDetouring = false;
+    public Queue<BlockPos> currentDetour = new LinkedList<>();
+    public boolean isDetouring = false;
     private final PathScanner pathScanner;
 
     // Configuration constants

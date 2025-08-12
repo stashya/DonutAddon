@@ -27,7 +27,6 @@ public class DonutAddon extends MeteorAddon {
         // Modules
         Modules.get().add(new ClusterFinder());
         Modules.get().add(new DeepslateESP());
-        Modules.get().add(new DeepslateESP2());
         Modules.get().add(new DripstoneESP());
         Modules.get().add(new StoneESP());
         Modules.get().add(new AutoRocket());

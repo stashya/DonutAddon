@@ -23,7 +23,12 @@ public class RotationController {
     private double acceleration = 0.8;
     private boolean humanLike = true;
     private double overshootChance = 0.3;
-    private boolean preciseLanding = true; // New setting for precise final positioning
+    private boolean preciseLanding = true;
+    private double randomVariation = 0.0; // NEW: Random variation setting
+
+    // Effective values with randomness applied (calculated once per rotation)
+    private double effectiveSpeed;
+    private double effectiveAcceleration;
 
     public void updateSettings(boolean smooth, double speed, double accel, boolean human, double overshoot) {
         this.smoothRotation = smooth;
@@ -31,6 +36,11 @@ public class RotationController {
         this.acceleration = accel;
         this.humanLike = human;
         this.overshootChance = overshoot;
+    }
+
+    // NEW: Method to update random variation setting
+    public void updateRandomVariation(double variation) {
+        this.randomVariation = variation;
     }
 
     // Add method to toggle precise landing
@@ -47,6 +57,9 @@ public class RotationController {
         this.targetPitch = targetPitch;
         this.callback = onComplete;
 
+        // Calculate randomized values for this rotation session
+        calculateEffectiveValues();
+
         if (!smoothRotation) {
             // Instant rotation - always precise
             setYawAngle(targetYaw);
@@ -61,6 +74,45 @@ public class RotationController {
         currentPitch = mc.player.getPitch();
         currentRotationSpeed = 0;
         currentPitchSpeed = 0;
+    }
+
+    // NEW: Calculate effective speed and acceleration with randomness
+    private void calculateEffectiveValues() {
+        if (randomVariation <= 0) {
+            // No randomness, use base values
+            effectiveSpeed = baseSpeed;
+            effectiveAcceleration = acceleration;
+            return;
+        }
+
+        // Generate random multipliers between -1 and 1
+        double speedMultiplier = (random.nextDouble() * 2) - 1; // -1 to 1
+        double accelMultiplier = (random.nextDouble() * 2) - 1; // -1 to 1
+
+        // Calculate speed variation
+        double speedVariation = randomVariation;
+        effectiveSpeed = baseSpeed + (speedMultiplier * speedVariation);
+
+        // Calculate acceleration variation (scaled proportionally)
+        // If acceleration is 0.8 and speed is 4.5, acceleration is ~17.8% of speed
+        // So acceleration randomness should be ~17.8% of speed randomness
+        double accelRatio = acceleration / baseSpeed;
+        double accelVariation = randomVariation * accelRatio;
+        effectiveAcceleration = acceleration + (accelMultiplier * accelVariation);
+
+        // Ensure minimum values to prevent negative or zero values
+        effectiveSpeed = Math.max(0.5, effectiveSpeed);
+        effectiveAcceleration = Math.max(0.1, effectiveAcceleration);
+
+        // Cap maximum values to prevent erratic behavior
+        effectiveSpeed = Math.min(baseSpeed * 2, effectiveSpeed);
+        effectiveAcceleration = Math.min(acceleration * 2, effectiveAcceleration);
+
+        // Debug output (optional)
+        if (false) { // Change to true for debugging
+            System.out.println(String.format("Rotation Randomness Applied: Speed %.2f -> %.2f, Accel %.2f -> %.2f",
+                baseSpeed, effectiveSpeed, acceleration, effectiveAcceleration));
+        }
     }
 
     public void update() {
@@ -102,20 +154,29 @@ public class RotationController {
             return true;
         }
 
-        // Dynamic speed based on distance
+        // Dynamic speed based on distance (using effectiveSpeed instead of baseSpeed)
         float targetSpeed;
+
+        // Reduce randomness effect when close to target for precision
+        double speedToUse = effectiveSpeed;
+        if (preciseLanding && distance < 5 && randomVariation > 0) {
+            // Blend between effective and base speed as we approach target
+            double blendFactor = distance / 5.0; // 1 at distance 5, 0 at distance 0
+            speedToUse = baseSpeed + (effectiveSpeed - baseSpeed) * blendFactor;
+        }
+
         if (distance > 45) {
-            targetSpeed = (float)(baseSpeed * 1.5);
+            targetSpeed = (float)(speedToUse * 1.5);
         } else if (distance > 15) {
-            targetSpeed = (float)baseSpeed;
+            targetSpeed = (float)speedToUse;
         } else {
             // Slow down as we approach for precision
-            targetSpeed = (float)(baseSpeed * (distance / 15));
+            targetSpeed = (float)(speedToUse * (distance / 15));
             targetSpeed = Math.max(targetSpeed, preciseLanding ? 0.3f : 0.5f);
         }
 
-        // Smoothly adjust current speed
-        float accel = (float)acceleration;
+        // Smoothly adjust current speed (using effectiveAcceleration)
+        float accel = (float)effectiveAcceleration;
         if (currentRotationSpeed < targetSpeed) {
             currentRotationSpeed = Math.min(currentRotationSpeed + accel, targetSpeed);
         } else {
@@ -173,20 +234,29 @@ public class RotationController {
             return true;
         }
 
-        // Dynamic speed based on distance (slightly slower than yaw for realism)
+        // Dynamic speed based on distance (using effectiveSpeed)
         float targetSpeed;
+
+        // Reduce randomness effect when close to target for precision
+        double speedToUse = effectiveSpeed;
+        if (preciseLanding && distance < 3 && randomVariation > 0) {
+            // Blend between effective and base speed as we approach target
+            double blendFactor = distance / 3.0;
+            speedToUse = baseSpeed + (effectiveSpeed - baseSpeed) * blendFactor;
+        }
+
         if (distance > 30) {
-            targetSpeed = (float)(baseSpeed * 1.2);
+            targetSpeed = (float)(speedToUse * 1.2);
         } else if (distance > 10) {
-            targetSpeed = (float)(baseSpeed * 0.8);
+            targetSpeed = (float)(speedToUse * 0.8);
         } else {
             // Slow down as we approach for precision
-            targetSpeed = (float)(baseSpeed * 0.8 * (distance / 10));
+            targetSpeed = (float)(speedToUse * 0.8 * (distance / 10));
             targetSpeed = Math.max(targetSpeed, preciseLanding ? 0.25f : 0.4f);
         }
 
-        // Smoothly adjust current speed
-        float accel = (float)(acceleration * 0.8); // Slightly slower acceleration for pitch
+        // Smoothly adjust current speed (using effectiveAcceleration)
+        float accel = (float)(effectiveAcceleration * 0.8); // Slightly slower acceleration for pitch
         if (currentPitchSpeed < targetSpeed) {
             currentPitchSpeed = Math.min(currentPitchSpeed + accel, targetSpeed);
         } else {
@@ -256,4 +326,8 @@ public class RotationController {
     public float getCurrentPitch() { return currentPitch; }
     public float getTargetYaw() { return targetYaw; }
     public float getTargetPitch() { return targetPitch; }
+
+    // Get effective values (for debugging)
+    public double getEffectiveSpeed() { return effectiveSpeed; }
+    public double getEffectiveAcceleration() { return effectiveAcceleration; }
 }

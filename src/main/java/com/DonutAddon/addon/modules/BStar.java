@@ -42,14 +42,9 @@ import meteordevelopment.meteorclient.systems.modules.player.EXPThrower;
 import net.minecraft.item.Items;
 import net.minecraft.world.chunk.Chunk;
 
+import java.util.*;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
-
-
-import java.util.HashSet;
-import java.util.List;
-import java.util.Queue;
-import java.util.Set;
 
 public class BStar extends Module {
     private final Set<BlockPos> hazardBlocks = new HashSet<>();
@@ -214,6 +209,15 @@ public class BStar extends Module {
         .build()
     );
 
+    private final Setting<Integer> maxStorageDetectionY = sgGeneral.add(new IntSetting.Builder()
+        .name("max-storage-detection-y")
+        .description("Maximum Y level to detect storage blocks for base detection (-1 to disable limit).")
+        .defaultValue(20)
+        .range(-1, 320)
+        .sliderRange(-64, 64)
+        .build()
+    );
+
     private final Setting<Double> overshootChance = sgRotation.add(new DoubleSetting.Builder()
         .name("overshoot-chance")
         .description("Chance to overshoot target rotation.")
@@ -298,6 +302,16 @@ public class BStar extends Module {
             return command;
         }
     }
+
+    private final Setting<Integer> safeMineDownSearchRadius = sgRTP.add(new IntSetting.Builder()
+        .name("safe-minedown-search-radius")
+        .description("Radius to search for safe mine-down spots when fluids detected.")
+        .defaultValue(10)
+        .range(5, 20)
+        .sliderRange(5, 20)
+        .visible(() -> false)
+        .build()
+    );
     private final Setting<Boolean> autoRepair = sgGeneral.add(new BoolSetting.Builder()
         .name("auto-repair")
         .description("Automatically throw EXP bottles to repair pickaxe when durability is low.")
@@ -332,13 +346,33 @@ public class BStar extends Module {
         .build()
     );
 
+    private final Setting<Integer> voidDepthThreshold = sgRTP.add(new IntSetting.Builder()
+        .name("void-depth-threshold")
+        .description("Minimum depth to consider as dangerous void/cave when mining down.")
+        .defaultValue(7)
+        .range(5, 15)
+        .sliderRange(5, 15)
+        .visible(rtpWhenStuck::get)
+        .build()
+    );
+
     private final Setting<Integer> playerCheckInterval = sgGeneral.add(new IntSetting.Builder()
         .name("player-check-interval")
         .description("How often to check for players (in ticks).")
         .defaultValue(20)
         .range(10, 60)
         .sliderRange(10, 60)
-        .visible(detectPlayers::get)
+        .visible(() -> false)
+        .build()
+    );
+
+    private final Setting<Double> rotationRandomness = sgRotation.add(new DoubleSetting.Builder()
+        .name("rotation-randomness")
+        .description("Random variation for rotation speed and acceleration (0 = no randomness).")
+        .defaultValue(0.5)
+        .range(0, 2.0)
+        .sliderRange(0, 2.0)
+        .visible(() -> true)
         .build()
     );
 
@@ -369,6 +403,13 @@ public class BStar extends Module {
     private final SimpleSneakCentering centeringHelper = new SimpleSneakCentering();
     private ParkourHelper parkourHelper;
     private boolean isDetouring = false;
+
+    private enum GroundHazard {
+        NONE,
+        FLUIDS,
+        VOID,
+        BOTH
+    }
 
     // Mining tracking
     private int blocksMined = 0;
@@ -416,6 +457,16 @@ public class BStar extends Module {
     private boolean miningDownInitiated = false;
     private int miningDownToggleTicks = 0;
 
+    private BlockPos safeMineDownTarget = null;
+    private List<BlockPos> mineDownCandidates = new ArrayList<>();
+    private int searchAttempts = 0;
+    private static final int MAX_SEARCH_ATTEMPTS = 5;
+
+    private boolean searchingForSafeMineSpot = false;
+
+    private int targetDepthWaitTicks = 0;
+    private static final int TARGET_DEPTH_WAIT_DURATION = 30; // 1.5 seconds (30 ticks)
+    private boolean waitingAtTargetDepth = false;
 
     // Stash detection
     private final Set<ChunkPos> processedChunks = new HashSet<>();
@@ -516,6 +567,442 @@ public class BStar extends Module {
                     }
                 });
             }).start();
+        }
+    }
+
+    private static class MineDownCandidate {
+        final BlockPos position;
+        final double distance;
+        final boolean reachable;
+
+        MineDownCandidate(BlockPos position, double distance, boolean reachable) {
+            this.position = position;
+            this.distance = distance;
+            this.reachable = reachable;
+        }
+    }
+
+    private BlockPos findSafeMineDownSpot(BlockPos playerPos) {
+        if (debugMode.get()) {
+            info("Searching for safe mine-down spot within " + safeMineDownSearchRadius.get() + " blocks...");
+        }
+
+        List<MineDownCandidate> candidates = new ArrayList<>();
+        int searchRadius = safeMineDownSearchRadius.get();
+        int blocksChecked = 0;
+        int maxChecks = 100; // Limit total checks for performance
+
+        // Use spiral search pattern - start close, expand outward
+        for (int radius = 2; radius <= searchRadius; radius += 2) { // Check every 2 blocks for efficiency
+            List<BlockPos> ringPositions = getSpiralRing(playerPos, radius);
+
+            for (BlockPos checkPos : ringPositions) {
+                if (blocksChecked >= maxChecks) {
+                    break; // Resource optimization
+                }
+                blocksChecked++;
+
+                // Only check positions at the same Y level
+                if (checkPos.getY() != playerPos.getY()) {
+                    continue;
+                }
+
+                // Check if this position has safe ground below
+                if (scanGroundBelowAt(checkPos)) {
+                    double distance = Math.sqrt(
+                        Math.pow(checkPos.getX() - playerPos.getX(), 2) +
+                            Math.pow(checkPos.getZ() - playerPos.getZ(), 2)
+                    );
+
+                    // Early exit if we found a very close spot
+                    if (distance <= 5) {
+                        if (debugMode.get()) {
+                            info("Found close safe spot at distance " + String.format("%.1f", distance));
+                        }
+
+                        // Quick reachability check for close spots
+                        if (isPositionReachable(playerPos, checkPos)) {
+                            return checkPos;
+                        }
+                    }
+
+                    // Add to candidates for later evaluation
+                    candidates.add(new MineDownCandidate(checkPos, distance, false));
+                }
+            }
+
+            // If we have some candidates, stop expanding search
+            if (candidates.size() >= 3) {
+                break;
+            }
+        }
+
+        if (candidates.isEmpty()) {
+            if (debugMode.get()) {
+                warning("No safe mine-down spots found in " + blocksChecked + " checked positions");
+            }
+            return null;
+        }
+
+        // Sort by distance
+        candidates.sort(Comparator.comparingDouble(c -> c.distance));
+
+        if (debugMode.get()) {
+            info("Found " + candidates.size() + " potential safe spots, checking reachability...");
+        }
+
+        // Check reachability for top candidates
+        for (int i = 0; i < Math.min(candidates.size(), MAX_SEARCH_ATTEMPTS); i++) {
+            MineDownCandidate candidate = candidates.get(i);
+
+            if (isPositionReachable(playerPos, candidate.position)) {
+                if (debugMode.get()) {
+                    info("Safe mine-down spot found at " + candidate.position +
+                        " (distance: " + String.format("%.1f", candidate.distance) + " blocks)");
+                }
+                return candidate.position;
+            }
+        }
+
+        if (debugMode.get()) {
+            warning("Found " + candidates.size() + " safe spots but none are reachable");
+        }
+
+        return null;
+    }
+
+    // 6. Helper method to generate spiral ring positions:
+    private List<BlockPos> getSpiralRing(BlockPos center, int radius) {
+        List<BlockPos> positions = new ArrayList<>();
+
+        // Generate square ring at given radius
+        for (int x = -radius; x <= radius; x++) {
+            // Top and bottom edges
+            positions.add(center.add(x, 0, -radius));
+            positions.add(center.add(x, 0, radius));
+        }
+
+        for (int z = -radius + 1; z < radius; z++) {
+            // Left and right edges (excluding corners already added)
+            positions.add(center.add(-radius, 0, z));
+            positions.add(center.add(radius, 0, z));
+        }
+
+        return positions;
+    }
+
+    // 7. Method to scan ground below at a specific position:
+    private boolean scanGroundBelowAt(BlockPos checkPos) {
+        GroundHazard hazard = scanGroundBelowDetailed(checkPos);
+        return hazard == GroundHazard.NONE;
+    }
+
+    // 8. Method to check if a position is reachable:
+    private boolean isPositionReachable(BlockPos from, BlockPos to) {
+        // Calculate direction to target
+        int dx = to.getX() - from.getX();
+        int dz = to.getZ() - from.getZ();
+
+        // We need to check if we can path to this position
+        // Use existing PathScanner to validate the path
+
+        // Break path into segments
+        int steps = Math.max(Math.abs(dx), Math.abs(dz));
+
+        if (steps == 0) {
+            return true; // Already there
+        }
+
+        // Check path in straight lines (Manhattan distance style)
+        // First move in X direction, then Z
+        if (dx != 0) {
+            Direction xDir = dx > 0 ? Direction.EAST : Direction.WEST;
+            PathScanner.ScanResult xScan = pathScanner.scanDirection(
+                from, xDir, Math.abs(dx), scanHeight.get(), false
+            );
+
+            if (!xScan.isSafe()) {
+                // Try Z first instead
+                if (dz != 0) {
+                    Direction zDir = dz > 0 ? Direction.SOUTH : Direction.NORTH;
+                    PathScanner.ScanResult zScan = pathScanner.scanDirection(
+                        from, zDir, Math.abs(dz), scanHeight.get(), false
+                    );
+
+                    if (!zScan.isSafe()) {
+                        return false; // Can't reach via simple paths
+                    }
+
+                    // Check X from new position
+                    BlockPos midPoint = from.offset(zDir, Math.abs(dz));
+                    PathScanner.ScanResult xScan2 = pathScanner.scanDirection(
+                        midPoint, xDir, Math.abs(dx), scanHeight.get(), false
+                    );
+
+                    return xScan2.isSafe();
+                }
+                return false;
+            }
+
+            // Check Z from new position if needed
+            if (dz != 0) {
+                BlockPos midPoint = from.offset(xDir, Math.abs(dx));
+                Direction zDir = dz > 0 ? Direction.SOUTH : Direction.NORTH;
+                PathScanner.ScanResult zScan = pathScanner.scanDirection(
+                    midPoint, zDir, Math.abs(dz), scanHeight.get(), false
+                );
+
+                return zScan.isSafe();
+            }
+        } else if (dz != 0) {
+            // Only Z movement needed
+            Direction zDir = dz > 0 ? Direction.SOUTH : Direction.NORTH;
+            PathScanner.ScanResult zScan = pathScanner.scanDirection(
+                from, zDir, Math.abs(dz), scanHeight.get(), false
+            );
+
+            return zScan.isSafe();
+        }
+
+        return true;
+    }
+
+    // 9. Handler for the new SEARCHING_SAFE_MINEDOWN state:
+    private void handleSearchingSafeMinedown() {
+        // IMPORTANT: Maintain RTP recovery flag
+        inRTPRecovery = true;
+
+        stopMovement();
+
+        BlockPos playerPos = mc.player.getBlockPos();
+        BlockPos safeSpot = findSafeMineDownSpot(playerPos);
+
+        if (safeSpot != null) {
+            // Found a safe spot, create waypoints to reach it
+            safeMineDownTarget = safeSpot;
+
+            // Create path to safe spot
+            List<BlockPos> waypoints = createPathToMineDown(playerPos, safeSpot);
+
+            if (!waypoints.isEmpty()) {
+                // Use existing waypoint system
+                Queue<BlockPos> waypointQueue = new LinkedList<>(waypoints);
+                pathfinder.currentDetour = new LinkedList<>(waypointQueue);
+                pathfinder.isDetouring = true;
+
+                currentWaypoint = pathfinder.getNextWaypoint();
+                currentState = MiningState.MOVING_TO_MINEDOWN;
+
+                if (debugMode.get()) {
+                    info("Moving to safe mine-down spot via " + waypoints.size() + " waypoints");
+                }
+
+                // Update visual waypoints
+                if (showWaypoints.get()) {
+                    synchronized (waypointBlocks) {
+                        waypointBlocks.clear();
+                        waypointBlocks.addAll(waypoints);
+                    }
+                }
+            } else {
+                if (debugMode.get()) {
+                    error("Failed to create path to safe spot");
+                }
+                resumeRTPLogic();
+            }
+        } else {
+            // No safe spot found, continue with RTP
+            if (debugMode.get()) {
+                warning("No reachable safe mine-down spots found, continuing with RTP");
+            }
+            resumeRTPLogic();
+        }
+    }
+
+    // 10. Create path to mine-down spot:
+    private List<BlockPos> createPathToMineDown(BlockPos from, BlockPos to) {
+        List<BlockPos> waypoints = new ArrayList<>();
+
+        int dx = to.getX() - from.getX();
+        int dz = to.getZ() - from.getZ();
+
+        // Create simple Manhattan path
+        if (Math.abs(dx) > 0) {
+            // First waypoint: move in X direction
+            BlockPos xWaypoint = from.add(dx, 0, 0);
+            waypoints.add(xWaypoint);
+        }
+
+        if (Math.abs(dz) > 0) {
+            // Second waypoint: move in Z direction (or final position)
+            waypoints.add(to);
+        }
+
+        // If no movement needed in either direction, waypoints will be empty
+        // but we still add the target
+        if (waypoints.isEmpty() && !from.equals(to)) {
+            waypoints.add(to);
+        }
+
+        return waypoints;
+    }
+
+    // 11. Handler for MOVING_TO_MINEDOWN state:
+    private void handleMovingToMinedown() {
+        // IMPORTANT: Maintain RTP recovery flag
+        inRTPRecovery = true;
+
+        // If we're currently rotating, don't do anything else
+        if (rotationController.isRotating()) {
+            stopMovement(); // Ensure we're not mining while rotating
+            return;
+        }
+
+        // Check if we have a current waypoint
+        if (currentWaypoint == null) {
+            currentWaypoint = pathfinder.getNextWaypoint();
+
+            if (currentWaypoint == null) {
+                // Reached the safe mine-down spot
+                if (debugMode.get()) {
+                    info("Reached safe mine-down location, preparing to center and mine down");
+                }
+
+                // Clear the detour manually
+                if (pathfinder != null && pathfinder.currentDetour != null) {
+                    pathfinder.currentDetour.clear();
+                    pathfinder.isDetouring = false;
+                }
+
+                synchronized (waypointBlocks) {
+                    waypointBlocks.clear();
+                }
+
+                // Transition to centering at the new position
+                currentState = MiningState.CENTERING;
+                return;
+            }
+        }
+
+        BlockPos playerPos = mc.player.getBlockPos();
+
+        // Calculate direction to waypoint
+        Direction dirToWaypoint = getDirectionToward(playerPos, currentWaypoint);
+
+        // Check if we need to rotate FIRST before checking parkour or mining
+        if (dirToWaypoint != null) {
+            float currentYaw = mc.player.getYaw();
+            float targetYaw = directionToYaw(dirToWaypoint);
+            float yawDiff = Math.abs(MathHelper.wrapDegrees(currentYaw - targetYaw));
+
+            if (yawDiff > 15) {
+                // Need to rotate - stop everything and rotate
+                stopMovement();
+
+                if (debugMode.get()) {
+                    info("Rotating to face waypoint (diff: " + String.format("%.1f", yawDiff) + " degrees)");
+                }
+
+                currentState = MiningState.ROTATING;
+                rotationController.startRotation(targetYaw, 0.0f, () -> {
+                    // After rotation completes, go back to moving
+                    currentState = MiningState.MOVING_TO_MINEDOWN;
+                    if (debugMode.get()) {
+                        info("Rotation complete, resuming movement to mine-down spot");
+                    }
+                });
+                return; // Don't do anything else this tick
+            }
+
+            // We're facing the right direction, now check for obstacles
+
+            // Check for parkour opportunities
+            if (!parkourHelper.isJumping()) {
+                ParkourHelper.JumpCheck jumpCheck = parkourHelper.checkJumpOpportunity(mc.player, dirToWaypoint);
+                if (jumpCheck.shouldJump) {
+                    if (debugMode.get()) {
+                        info("Jumping over obstacle while moving to mine-down spot: " + jumpCheck.reason);
+                    }
+                    if (parkourHelper.startJump(jumpCheck.targetPos)) {
+                        startMining(); // Can mine while jumping since we're facing the right way
+                        return;
+                    }
+                }
+            }
+        }
+
+        // Check if we've reached the waypoint
+        double distanceToWaypoint = Math.sqrt(
+            Math.pow(playerPos.getX() - currentWaypoint.getX(), 2) +
+                Math.pow(playerPos.getZ() - currentWaypoint.getZ(), 2)
+        );
+
+        if (distanceToWaypoint < 0.5) {
+            if (debugMode.get()) {
+                info("Reached waypoint while moving to mine-down spot");
+            }
+            currentWaypoint = null;
+            return;
+        }
+
+        // Only mine if we're facing the right direction and not rotating
+        if (dirToWaypoint != null && !rotationController.isRotating()) {
+            // Mine toward waypoint
+            startMining();
+            lastPos = mc.player.getPos();
+
+            // Safety scan while following waypoint
+            scanTicks++;
+            if (scanTicks >= 20) {
+                scanTicks = 0;
+
+                PathScanner.ScanResult quickScan = pathScanner.scanDirection(
+                    playerPos, dirToWaypoint, 3, 4, false
+                );
+
+                if (!quickScan.isSafe() && quickScan.getHazardDistance() <= 2) {
+                    if (debugMode.get()) {
+                        warning("Hazard detected while moving to mine-down spot! Type: " + quickScan.getHazardType());
+                    }
+
+                    stopMovement();
+                    currentWaypoint = null;
+
+                    if (pathfinder != null && pathfinder.currentDetour != null) {
+                        pathfinder.currentDetour.clear();
+                        pathfinder.isDetouring = false;
+                    }
+
+                    currentState = MiningState.SEARCHING_SAFE_MINEDOWN;
+                }
+            }
+        } else if (dirToWaypoint == null) {
+            // Can't determine direction, might be at waypoint already
+            currentWaypoint = null;
+        }
+    }
+
+    // 12. Helper method to resume RTP logic when safe spot search fails:
+    private void resumeRTPLogic() {
+        searchAttempts = 0;
+        safeMineDownTarget = null;
+        mineDownCandidates.clear();
+
+        // Continue with RTP attempts
+        if (rtpWhenStuck.get()) {
+            rtpAttempts++;
+            if (rtpAttempts < 5) {
+                if (debugMode.get()) {
+                    info("Attempting RTP to find better location (attempt " + rtpAttempts + "/5)");
+                }
+                initiateRTP();
+            } else {
+                error("Failed to find safe mining location after 5 attempts");
+                toggle();
+            }
+        } else {
+            error("Cannot mine down - fluids detected and RTP disabled");
+            toggle();
         }
     }
 
@@ -662,6 +1149,11 @@ public class BStar extends Module {
         hasReachedMineDepth = false;
         mineDownScanTicks = 0;
         inRTPRecovery = false;
+        safeMineDownTarget = null;
+        mineDownCandidates.clear();
+        searchAttempts = 0;
+        searchingForSafeMineSpot = false;
+        waitingAtTargetDepth = false;
 
         info("BStar activated at Y=" + Math.round(mc.player.getY()));
 
@@ -689,6 +1181,12 @@ public class BStar extends Module {
 
         // Stop centering if active
         centeringHelper.stopCentering();
+
+        safeMineDownTarget = null;
+        mineDownCandidates.clear();
+        searchingForSafeMineSpot = false;
+        searchAttempts = 0;
+        waitingAtTargetDepth = false;
 
         synchronized (hazardBlocks) {
             hazardBlocks.clear();
@@ -734,8 +1232,15 @@ public class BStar extends Module {
         // Use BlockESP-style block scanning for spawners
         chunk.spawners = searchChunkForSpawnersOptimized(event.chunk());
 
-        // Keep your existing block entity detection for storage blocks (this works fine)
+        // Storage block detection with Y-level filtering
+        int maxY = maxStorageDetectionY.get();
+
         for (BlockEntity blockEntity : event.chunk().getBlockEntities().values()) {
+            // Check Y-level if limit is enabled
+            if (maxY != -1 && blockEntity.getPos().getY() > maxY) {
+                continue; // Skip storage blocks above the max Y level
+            }
+
             if (selectedStorageBlocks.contains(blockEntity.getType())) {
                 if (blockEntity instanceof ChestBlockEntity) {
                     chunk.chests++;
@@ -770,6 +1275,11 @@ public class BStar extends Module {
         } else if (totalStorageBlocks >= baseThreshold.get()) {
             isBase = true;
             foundType = "base";
+
+            if (debugMode.get()) {
+                info("Found base with " + totalStorageBlocks + " storage blocks in chunk [" +
+                    chunkPos.x + ", " + chunkPos.z + "] (below Y=" + maxY + ")");
+            }
         }
 
         if (isBase) {
@@ -983,7 +1493,7 @@ public class BStar extends Module {
                     error("Pickaxe durability below 10% (" +
                         String.format("%.1f%%", durabilityPercent * 100) +
                         ")! Stopping to prevent tool break.");
-                } else if (mc.player.getHealth() < 10) {
+                } else if (mc.player.getHealth() < 5) {
                     error("Low health! Need to heal before continuing.");
                 } else {
                     error("Safety check failed - check health and tool durability");
@@ -1004,6 +1514,7 @@ public class BStar extends Module {
             humanLikeRotation.get(),
             overshootChance.get()
         );
+        rotationController.updateRandomVariation(rotationRandomness.get());
 
         // Update helpers
         if (parkourHelper != null) {
@@ -1043,12 +1554,22 @@ public class BStar extends Module {
                 case CALCULATING_DETOUR -> handleCalculatingDetour();
                 case FOLLOWING_DETOUR -> handleFollowingDetour();
                 case CHANGING_DIRECTION -> handleChangingDirection();
-                case ROTATING -> currentState = MiningState.SCANNING_PRIMARY;
+                case ROTATING -> {
+                    // Stop all movement while rotating
+                    stopMovement();
+
+                    // The rotation controller will handle the state transition via its callback
+                    // We just need to wait here and do nothing
+
+                    // Don't change state here - let the rotation callback handle it
+                }
                 case RTP_INITIATED -> handleRTPInitiated();
                 case RTP_WAITING -> handleRTPWaiting();
                 case RTP_COOLDOWN -> handleRTPCooldown();
                 case RTP_SCANNING_GROUND -> handleRTPScanningGround();
                 case MINING_DOWN -> handleMiningDown();
+                case SEARCHING_SAFE_MINEDOWN -> handleSearchingSafeMinedown();
+                case MOVING_TO_MINEDOWN -> handleMovingToMinedown();
                 case STOPPED -> {
                     error("All directions blocked - stopping");
                     toggle();
@@ -1079,12 +1600,40 @@ public class BStar extends Module {
     }
 
     private void proceedAfterCentering() {
+        // Check if we just centered after moving to a safe mine-down spot
+        if (safeMineDownTarget != null && mc.player.getBlockPos().equals(safeMineDownTarget)) {
+            if (debugMode.get()) {
+                info("Centered at safe mine-down spot, resuming mining down");
+            }
+
+            // IMPORTANT: Ensure we maintain the RTP recovery state
+            inRTPRecovery = true;  // Keep this flag set!
+
+            // Clear the target since we've reached it
+            safeMineDownTarget = null;
+
+            // Go back to scanning ground, which will now pass the safety check
+            // and proceed to mine down
+            currentState = MiningState.RTP_SCANNING_GROUND;
+            return;
+        }
+
+        // Check if we're still in RTP recovery mode (mining down from surface)
+        if (inRTPRecovery && mc.player.getY() > mineDownTarget.get()) {
+            if (debugMode.get()) {
+                info("Still in mining down phase after centering, resuming scan");
+            }
+            currentState = MiningState.RTP_SCANNING_GROUND;
+            return;
+        }
+
+        // Normal centering completion for regular mining
         float yaw = mc.player.getYaw();
         Direction initialDir = getCardinalDirection(yaw);
         pathfinder.setInitialDirection(initialDir);
 
         float targetYaw = directionToYaw(initialDir);
-        final Direction finalDir = initialDir; // Make it final for lambda
+        final Direction finalDir = initialDir;
         currentState = MiningState.ROTATING;
 
         rotationController.startRotation(targetYaw, 0.0f, () -> {
@@ -1100,6 +1649,8 @@ public class BStar extends Module {
             currentState == MiningState.RTP_WAITING ||
             currentState == MiningState.RTP_COOLDOWN ||
             currentState == MiningState.RTP_SCANNING_GROUND ||
+            currentState == MiningState.SEARCHING_SAFE_MINEDOWN ||  // NEW
+            currentState == MiningState.MOVING_TO_MINEDOWN ||       // NEW
             currentState == MiningState.MINING_DOWN ||
             inRTPRecovery;
     }
@@ -1167,12 +1718,9 @@ public class BStar extends Module {
                 info("Already below target depth Y=" + Math.round(mc.player.getY()) + " - resuming normal mining");
             }
 
-            // Skip mining down, go straight to normal mining
             hasReachedMineDepth = true;
             rtpAttempts = 0;
             inRTPRecovery = false;
-
-            // Start normal mining sequence
             currentState = MiningState.CENTERING;
             return;
         }
@@ -1184,23 +1732,19 @@ public class BStar extends Module {
             }
 
             if (centeringHelper.startCentering()) {
-                // Stay in this state while centering
                 return;
             }
         } else if (centeringHelper.isCentering()) {
-            // Currently centering, check if done
             if (!centeringHelper.tick()) {
-                // Centering complete
                 if (debugMode.get()) {
                     info("Centering complete, now checking ground and rotating down");
                 }
             } else {
-                // Still centering
                 return;
             }
         }
 
-        // We're now centered, rotate to look straight down
+        // Rotate to look straight down
         float currentPitch = mc.player.getPitch();
         if (Math.abs(currentPitch - 90.0f) > 1.0f) {
             if (debugMode.get()) {
@@ -1216,8 +1760,10 @@ public class BStar extends Module {
             return;
         }
 
-        // Scan ground below
-        if (scanGroundBelow()) {
+        // Scan ground below with detailed hazard detection
+        GroundHazard hazard = scanGroundBelowDetailed(mc.player.getBlockPos());
+
+        if (hazard == GroundHazard.NONE) {
             // Ground is safe, start mining down
             if (debugMode.get()) {
                 info("Ground is safe - starting to mine down to Y=" + mineDownTarget.get());
@@ -1225,100 +1771,126 @@ public class BStar extends Module {
 
             hasReachedMineDepth = false;
             mineDownScanTicks = 0;
-            miningDownInitiated = false; // RESET FLAG
+            miningDownInitiated = false;
             miningDownToggleTicks = 0;
             currentState = MiningState.MINING_DOWN;
-
-            // DON'T start mining here - let handleMiningDown do it with proper toggle
         } else {
-            // Ground has fluids - ALWAYS try RTP if enabled
-            if (debugMode.get()) {
-                warning("Fluids detected below!");
-            }
-
-            // Check if RTP is enabled
-            if (rtpWhenStuck.get()) {
-                if (debugMode.get()) {
-                    if (rtpAttempts == 0) {
-                        info("Surface has fluids below - initiating RTP to find safe ground");
-                    } else {
-                        warning("RTP landed on fluids - trying again (attempt " + (rtpAttempts + 1) + "/5)");
-                    }
-                }
-
-                rtpAttempts++;
-                if (rtpAttempts < 5) {
-                    initiateRTP();
-                } else {
-                    error("Failed to find safe ground after 5 RTP attempts");
-                    toggle();
-                }
+            // MODIFIED: Hazard detected - provide specific message
+            String hazardType = "";
+            if (hazard == GroundHazard.FLUIDS) {
+                hazardType = "Fluids";
+            } else if (hazard == GroundHazard.VOID) {
+                hazardType = "Large void/cave";
             } else {
-                // RTP not enabled, can't escape fluids
-                error("Cannot mine down - fluids detected below! Enable 'RTP When Stuck' or try starting from a different location.");
-                toggle();
+                hazardType = "Fluids and void";
             }
+
+            if (debugMode.get()) {
+                warning(hazardType + " detected below! Searching for nearby safe mine-down spot...");
+            }
+
+            // Reset search attempts if this is a new position
+            if (safeMineDownTarget == null || !mc.player.getBlockPos().equals(safeMineDownTarget)) {
+                searchAttempts = 0;
+                safeMineDownTarget = null;
+            }
+
+            // Try to find a safe mine-down spot nearby
+            currentState = MiningState.SEARCHING_SAFE_MINEDOWN;
         }
     }
+
 
     private void handleMiningDown() {
         // Check if we've reached target depth
         if (mc.player.getY() <= mineDownTarget.get()) {
-            if (!hasReachedMineDepth) {
+            // First time reaching target depth
+            if (!hasReachedMineDepth && !waitingAtTargetDepth) {
                 if (debugMode.get()) {
-                    info("Reached target depth Y=" + Math.round(mc.player.getY()) + " - starting normal mining sequence");
+                    info("Reached target depth Y=" + Math.round(mc.player.getY()) + " - waiting 1.5 seconds before starting normal mining");
                 }
 
-                hasReachedMineDepth = true;
-
-                // IMPORTANT: Stop ALL movement including sneak BEFORE transitioning
+                // Stop all movement
                 stopMovement();
-                setPressed(mc.options.sneakKey, false); // EXPLICITLY RELEASE SNEAK
+                setPressed(mc.options.sneakKey, false);
+                setPressed(mc.options.attackKey, false);
 
-                // Clear RTP recovery state
-                rtpAttempts = 0;
-                inRTPRecovery = false;
-                rtpCommandSent = false;
-                miningDownInitiated = false; // Reset flag
-
-                // Now go to CENTERING state with no keys pressed
-                currentState = MiningState.CENTERING;
-
-                if (debugMode.get()) {
-                    info("Entering centering state to begin normal mining");
-                }
+                // Start waiting
+                waitingAtTargetDepth = true;
+                targetDepthWaitTicks = 0;
+                return;
             }
-            return;
+
+            // Currently waiting at target depth
+            if (waitingAtTargetDepth) {
+                targetDepthWaitTicks++;
+
+                // Keep everything stopped while waiting
+                stopMovement();
+                setPressed(mc.options.sneakKey, false);
+                setPressed(mc.options.attackKey, false);
+
+                // Show progress message every 0.5 seconds
+                if (debugMode.get() && targetDepthWaitTicks % 10 == 0) {
+                    float secondsRemaining = (TARGET_DEPTH_WAIT_DURATION - targetDepthWaitTicks) / 20.0f;
+                    System.out.println("Waiting... " + String.format("%.1f", secondsRemaining) + " seconds remaining");
+                }
+
+                // Check if wait is complete
+                if (targetDepthWaitTicks >= TARGET_DEPTH_WAIT_DURATION) {
+                    if (debugMode.get()) {
+                        info("Wait complete, starting normal mining sequence");
+                    }
+
+                    hasReachedMineDepth = true;
+                    waitingAtTargetDepth = false;
+                    targetDepthWaitTicks = 0;
+
+                    // Clear all mining down related state
+                    rtpAttempts = 0;
+                    inRTPRecovery = false;
+                    rtpCommandSent = false;
+                    miningDownInitiated = false;
+                    safeMineDownTarget = null;
+                    searchAttempts = 0;
+
+                    currentState = MiningState.CENTERING;
+
+                    if (debugMode.get()) {
+                        info("Entering centering state to begin normal mining");
+                    }
+                }
+                return;
+            }
+
+            // This shouldn't be reached but kept for safety
+            if (hasReachedMineDepth) {
+                return;
+            }
         }
 
-        // FIXED: Toggle keys on first entry or periodically to ensure they register
+        // Toggle keys on first entry
         if (!miningDownInitiated) {
-            // First time entering mining down - toggle keys to ensure registration
             if (debugMode.get()) {
                 info("Initiating mining down - toggling keys to ensure registration");
             }
 
-            // First, make sure all keys are released
             stopMovement();
             setPressed(mc.options.sneakKey, false);
             setPressed(mc.options.attackKey, false);
 
-            // Small delay then press keys (will happen next tick)
             miningDownInitiated = true;
             miningDownToggleTicks = 0;
             return;
         }
 
-        // Increment toggle counter
         miningDownToggleTicks++;
 
-        // Re-toggle keys every 20 ticks (1 second) to ensure they stay registered
+        // Re-toggle keys periodically
         if (miningDownToggleTicks % 20 == 0) {
-            // Quick toggle to refresh key state
             setPressed(mc.options.attackKey, false);
             setPressed(mc.options.sneakKey, false);
 
-            // Will re-press on next line
             if (debugMode.get() && miningDownToggleTicks % 100 == 0) {
                 System.out.println("Refreshing mining keys (tick " + miningDownToggleTicks + ")");
             }
@@ -1330,39 +1902,38 @@ public class BStar extends Module {
         if (mineDownScanTicks >= MINE_DOWN_SCAN_INTERVAL) {
             mineDownScanTicks = 0;
 
-            // Quick scan for fluids while mining down
-            if (!scanGroundBelow()) {
-                // IMMEDIATELY STOP MINING AND SNEAKING
+            // Use predictive scanning - check 5 blocks below current position
+            BlockPos currentPos = mc.player.getBlockPos();
+            BlockPos predictedPos = currentPos.down(5); // Or use mineDownPredictionDistance.get() if you added that setting
+
+            if (debugMode.get()) {
+                System.out.println("Predictive scan from Y=" + predictedPos.getY() + " (5 blocks below current)");
+            }
+
+            // Quick scan for hazards from PREDICTED position
+            GroundHazard hazard = scanGroundBelowDetailed(predictedPos);
+
+            if (hazard != GroundHazard.NONE) {
                 stopMovement();
-                setPressed(mc.options.sneakKey, false); // Release sneak immediately
+                setPressed(mc.options.sneakKey, false);
+
+                String hazardType = "";
+                if (hazard == GroundHazard.FLUIDS) {
+                    hazardType = "Fluids";
+                } else if (hazard == GroundHazard.VOID) {
+                    hazardType = "Large void/cave";
+                } else {
+                    hazardType = "Fluids and void";
+                }
 
                 if (debugMode.get()) {
-                    error("Fluids detected while mining down - stopping immediately!");
+                    warning(hazardType + " detected 5 blocks below! Stopping before we fall");
+                    info("Hazard will be at Y=" + predictedPos.getY() + ", current Y=" + currentPos.getY());
                 }
 
-                // ALWAYS try RTP if enabled and fluids detected
-                if (rtpWhenStuck.get()) {
-                    rtpAttempts++;
-                    if (rtpAttempts < 5) {
-                        if (debugMode.get()) {
-                            info("Attempting RTP to escape fluids (attempt " + rtpAttempts + "/5)");
-                        }
-                        initiateRTP();
-                    } else {
-                        error("Too many fluid encounters - stopping module");
-                        inRTPRecovery = false;
-                        miningDownInitiated = false;
-                        toggle();
-                    }
-                } else {
-                    // RTP not enabled, can't escape
-                    error("Hit fluids while mining down - cannot continue without RTP enabled");
-                    inRTPRecovery = false;
-                    miningDownInitiated = false;
-                    toggle();
-                }
-
-                return; // Exit immediately, don't continue mining
+                // Try to find safe spot first before RTP
+                currentState = MiningState.SEARCHING_SAFE_MINEDOWN;
+                return;
             }
         }
 
@@ -1370,7 +1941,7 @@ public class BStar extends Module {
         setPressed(mc.options.attackKey, true);
         setPressed(mc.options.sneakKey, true);
 
-        // Extra insurance - if we're not moving down after 2 seconds, try toggling again
+        // Check if we're stuck
         if (miningDownToggleTicks > 40 && miningDownToggleTicks % 40 == 0) {
             Vec3d currentPos = mc.player.getPos();
             if (lastPos != null && Math.abs(currentPos.y - lastPos.y) < 0.5) {
@@ -1378,7 +1949,6 @@ public class BStar extends Module {
                     warning("Not moving down - retoggling mining keys");
                 }
 
-                // Force retoggle
                 stopMovement();
                 setPressed(mc.options.sneakKey, false);
                 setPressed(mc.options.attackKey, false);
@@ -1389,16 +1959,71 @@ public class BStar extends Module {
     }
 
     private boolean scanGroundBelow() {
-        World world = mc.world;
-        BlockPos playerPos = mc.player.getBlockPos();
-        int scanRadius = groundScanSize.get() / 2;
+        GroundHazard hazard = scanGroundBelowDetailed(mc.player.getBlockPos());
 
-        // Scan area below player (check up to 10 blocks down)
+        if (hazard != GroundHazard.NONE) {
+            if (debugMode.get()) {
+                if (hazard == GroundHazard.FLUIDS) {
+                    warning("Fluids detected below!");
+                } else if (hazard == GroundHazard.VOID) {
+                    warning("Large void/cave detected below! (" + voidDepthThreshold.get() + "+ blocks deep)");
+                } else {
+                    warning("Both fluids and void detected below!");
+                }
+            }
+            return false;
+        }
+
+        return true;
+    }
+
+    private GroundHazard scanGroundBelowDetailed(BlockPos checkPos) {
+        World world = mc.world;
+        int scanRadius = groundScanSize.get() / 2;
+        boolean hasFluid = false;
+        boolean hasVoid = false;
+
+        // Check for voids in the center area (directly below player)
+        // We check a smaller area for voids to be more precise
+        int voidCheckRadius = Math.min(scanRadius, 1); // Check 1 block radius for voids
+
+        for (int x = -voidCheckRadius; x <= voidCheckRadius; x++) {
+            for (int z = -voidCheckRadius; z <= voidCheckRadius; z++) {
+                // Check for deep void/cave
+                int solidDepth = 0;
+                boolean foundSolid = false;
+
+                for (int depth = 1; depth <= 15; depth++) { // Check up to 15 blocks deep
+                    BlockPos belowPos = checkPos.add(x, -depth, z);
+                    BlockState state = world.getBlockState(belowPos);
+
+                    if (!state.isAir() && state.isSolidBlock(world, belowPos)) {
+                        solidDepth = depth;
+                        foundSolid = true;
+                        break;
+                    }
+                }
+
+                // If no solid block found within threshold blocks, it's a dangerous void
+                if (!foundSolid || solidDepth >= voidDepthThreshold.get()) {
+                    hasVoid = true;
+                    if (debugMode.get()) {
+                        if (!foundSolid) {
+                            System.out.println("Void detected at offset X=" + x + " Z=" + z + " (no solid ground within 15 blocks)");
+                        } else {
+                            System.out.println("Deep drop detected at offset X=" + x + " Z=" + z + " (solid at depth " + solidDepth + ")");
+                        }
+                    }
+                }
+            }
+        }
+
+        // Check for fluids in wider area
         for (int depth = 1; depth <= 10; depth++) {
             for (int x = -scanRadius; x <= scanRadius; x++) {
                 for (int z = -scanRadius; z <= scanRadius; z++) {
-                    BlockPos checkPos = playerPos.add(x, -depth, z);
-                    BlockState state = world.getBlockState(checkPos);
+                    BlockPos belowPos = checkPos.add(x, -depth, z);
+                    BlockState state = world.getBlockState(belowPos);
 
                     // Check for fluids
                     if (state.getFluidState().getFluid() == Fluids.LAVA ||
@@ -1406,19 +2031,26 @@ public class BStar extends Module {
                         state.getFluidState().getFluid() == Fluids.WATER ||
                         state.getFluidState().getFluid() == Fluids.FLOWING_WATER) {
 
+                        hasFluid = true;
                         if (debugMode.get()) {
                             String fluidType = state.getFluidState().getFluid() == Fluids.LAVA ? "Lava" : "Water";
                             System.out.println("Found " + fluidType + " at depth " + depth + ", offset X=" + x + " Z=" + z);
                         }
-                        return false;
                     }
                 }
             }
         }
 
-        return true; // No fluids found
-    }
+        if (hasFluid && hasVoid) {
+            return GroundHazard.BOTH;
+        } else if (hasFluid) {
+            return GroundHazard.FLUIDS;
+        } else if (hasVoid) {
+            return GroundHazard.VOID;
+        }
 
+        return GroundHazard.NONE;
+    }
     private void initiateRTP() {
         if (mc.player == null) return;
 
@@ -1825,14 +2457,17 @@ public class BStar extends Module {
     }
 
     private void handleChangingDirection() {
+        // If currently rotating, just wait
+        if (rotationController.isRotating()) {
+            stopMovement();
+            return;
+        }
+
         if (pendingDirection == null) {
-            // This shouldn't happen anymore since we handle RTP in handleCalculatingDetour
-            // But keep as a safety fallback
             if (debugMode.get()) {
                 warning("handleChangingDirection called with null pendingDirection - this shouldn't happen");
             }
 
-            // Try RTP as a last resort if enabled
             if (rtpWhenStuck.get()) {
                 if (debugMode.get()) {
                     warning("Initiating RTP recovery as fallback");
@@ -1854,26 +2489,21 @@ public class BStar extends Module {
 
         // First, center before rotating to new direction
         if (!centeringHelper.isCentering()) {
-            // Check if we need to center
             if (!isCenteredOnBlock(mc.player.getBlockPos())) {
                 if (debugMode.get()) {
                     info("Centering before changing direction to " + pendingDirection.getName());
                 }
 
                 if (centeringHelper.startCentering()) {
-                    // Started centering, stay in this state
                     return;
                 }
             }
         } else {
-            // Currently centering, check if done
             if (!centeringHelper.tick()) {
-                // Centering complete, now we can rotate
                 if (debugMode.get()) {
                     info("Centering complete, now rotating to " + pendingDirection.getName());
                 }
             } else {
-                // Still centering
                 return;
             }
         }
