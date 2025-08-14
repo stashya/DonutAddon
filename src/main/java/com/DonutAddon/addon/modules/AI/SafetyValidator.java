@@ -23,6 +23,9 @@ public class SafetyValidator {
     private int miningDownAttempts = 0;
     private Vec3d lastMiningDownPosition;
 
+    private boolean jumpedWhileMoving = false;
+    private int jumpFollowUpTicks = 0;
+
     // NEW: Recovery tracking
     private int recoveryGracePeriod = 0;  // Grace period after recovery attempt
     private double recoveryStartY = 0;     // Y position when recovery started
@@ -36,6 +39,7 @@ public class SafetyValidator {
     private static final double MIN_DURABILITY_PERCENT = 0.10;
     private static final double MOVEMENT_THRESHOLD = 1.0;
     private static final double VERTICAL_MOVEMENT_THRESHOLD = 0.5; // For mining down
+
 
     // Track position history for better stuck detection
     private Vec3d positionHistory[] = new Vec3d[20];
@@ -304,6 +308,26 @@ public class SafetyValidator {
             );
         }
 
+        // Check if we moved after jumping (for attempt 1 follow-up)
+        if (jumpedWhileMoving && jumpFollowUpTicks > 0) {
+            jumpFollowUpTicks--;
+
+            // Check if we've moved horizontally after jumping
+            if (horizontalDistance > MOVEMENT_THRESHOLD) {
+                System.out.println("Movement detected after jump+forward, stopping movement");
+                jumpedWhileMoving = false;
+                jumpFollowUpTicks = 0;
+                // Return a signal to stop movement
+                return StuckRecoveryAction.STOP_MOVEMENT;
+            }
+
+            if (jumpFollowUpTicks == 0) {
+                // Timeout waiting for movement after jump
+                jumpedWhileMoving = false;
+                System.out.println("No movement after jump+forward, proceeding to next attempt");
+            }
+        }
+
         boolean isStuck = horizontalDistance < MOVEMENT_THRESHOLD &&
             (oldPos == null || longerTermMovement < 0.5);
 
@@ -320,26 +344,36 @@ public class SafetyValidator {
 
                 // Reset stuck counter and update position
                 stuckTicks = 0;
-                lastPosition = currentPos; // Update reference position
+                lastPosition = currentPos;
 
                 if (unstuckAttempts == 1) {
                     if (allowJumping && player.isOnGround()) {
-                        // FIRST ATTEMPT: Jump (only if allowed)
-                        System.out.println("=== STUCK RECOVERY: ATTEMPT 1 - JUMPING ===");
-                        player.jump();
+                        // ATTEMPT 1: Jump while moving forward
+                        System.out.println("=== STUCK RECOVERY: ATTEMPT 1 - JUMP WHILE MOVING FORWARD ===");
+                        jumpedWhileMoving = true;
+                        jumpFollowUpTicks = 20; // Monitor for 1 second
                         jumpCooldown = JUMP_COOLDOWN_TICKS;
-                        return StuckRecoveryAction.JUMPED;
+                        return StuckRecoveryAction.JUMP_FORWARD;
                     } else {
-                        // Can't jump, go straight to path recalculation
+                        // Can't jump, try recalculating path
                         System.out.println("=== STUCK RECOVERY: ATTEMPT 1 - RECALCULATE PATH (no jump) ===");
                         return StuckRecoveryAction.RECALCULATE_PATH;
                     }
-                } else if (unstuckAttempts == 2 && !allowJumping) {
-                    // For movement without jumping, try finding new spot
-                    System.out.println("=== STUCK RECOVERY: ATTEMPT 2 - FIND NEW SPOT ===");
-                    return StuckRecoveryAction.FIND_NEW_SPOT;
-                } else if (unstuckAttempts >= 2) {
-                    // Final attempt: request module reset
+                } else if (unstuckAttempts == 2) {
+                    // ATTEMPT 2: Try to find alternative spot or recalculate
+                    if (!allowJumping) {
+                        System.out.println("=== STUCK RECOVERY: ATTEMPT 2 - FIND NEW SPOT ===");
+                        return StuckRecoveryAction.FIND_NEW_SPOT;
+                    } else {
+                        System.out.println("=== STUCK RECOVERY: ATTEMPT 2 - RECALCULATE PATH ===");
+                        return StuckRecoveryAction.RECALCULATE_PATH;
+                    }
+                } else if (unstuckAttempts == 3) {
+                    // ATTEMPT 3: Path is blocked, trigger RTP sequence
+                    System.out.println("=== STUCK RECOVERY: ATTEMPT 3 - PATH BLOCKED, TRIGGER RTP ===");
+                    return StuckRecoveryAction.PATH_BLOCKED_RTP;
+                } else if (unstuckAttempts >= 4) {
+                    // FINAL ATTEMPT: Request module reset
                     System.out.println("=== STUCK RECOVERY: FINAL - REQUESTING MODULE RESET ===");
                     needsModuleReset = true;
                     jumpCooldown = JUMP_COOLDOWN_TICKS * 2;
@@ -354,6 +388,8 @@ public class SafetyValidator {
             stuckTicks = 0;
             unstuckAttempts = 0;
             needsModuleReset = false;
+            jumpedWhileMoving = false;
+            jumpFollowUpTicks = 0;
             lastPosition = currentPos;
         }
 
@@ -435,12 +471,14 @@ public class SafetyValidator {
      * Enum for recovery actions
      */
     public enum StuckRecoveryAction {
-        NONE,               // Not stuck, continue normally
-        JUMPED,             // Just jumped, wait to see if it helps
-        NEEDS_RESET,        // Need to reset module state
-        RETOGGLE_KEYS,      // Retoggle attack/sneak keys (mining down)
-        MOVE_AND_RETRY,     // Move horizontally then retry (mining down)
-        FIND_NEW_SPOT,      // Abandon current spot, find new one
-        RECALCULATE_PATH    // Recalculate path to target
+        NONE,
+        JUMP_FORWARD,      // New: Jump while moving forward
+        STOP_MOVEMENT,     // New: Stop after successful jump movement
+        PATH_BLOCKED_RTP,  // New: Trigger RTP sequence
+        RETOGGLE_KEYS,
+        MOVE_AND_RETRY,
+        FIND_NEW_SPOT,
+        RECALCULATE_PATH,
+        NEEDS_RESET
     }
 }

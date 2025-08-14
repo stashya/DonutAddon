@@ -22,6 +22,7 @@ public class PathScanner {
     private int tunnelWidth = 3;
     private int tunnelHeight = 3;
 
+
     public PathScanner() {
         // Empty constructor - no Baritone needed
     }
@@ -317,6 +318,7 @@ public class PathScanner {
             }
         }
 
+        // Rest of the method remains the same...
         // Check for falling blocks only if checkFalling is true
         if (checkFalling && isFallingBlock(block)) {
             System.out.println("=== GRAVEL DETECTED ===");

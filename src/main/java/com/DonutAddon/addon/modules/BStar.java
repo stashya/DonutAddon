@@ -9,6 +9,7 @@ import com.DonutAddon.addon.modules.AI.*;
 import meteordevelopment.meteorclient.utils.player.FindItemResult;
 import meteordevelopment.meteorclient.utils.player.InvUtils;
 import meteordevelopment.orbit.EventHandler;
+import net.minecraft.block.Block;
 import net.minecraft.block.BlockState;
 import net.minecraft.block.Blocks;
 import net.minecraft.block.entity.*;
@@ -39,8 +40,12 @@ import net.minecraft.network.packet.s2c.play.PlayerPositionLookS2CPacket;
 import net.minecraft.item.Items;
 import net.minecraft.world.World;
 import meteordevelopment.meteorclient.systems.modules.player.EXPThrower;
-import net.minecraft.item.Items;
 import net.minecraft.world.chunk.Chunk;
+import meteordevelopment.meteorclient.systems.modules.misc.AutoLog;
+import meteordevelopment.meteorclient.events.render.Render2DEvent;
+import meteordevelopment.meteorclient.renderer.Renderer2D;
+import meteordevelopment.meteorclient.renderer.Texture;
+import net.minecraft.util.Identifier;
 
 import java.util.*;
 import java.util.regex.Matcher;
@@ -276,6 +281,13 @@ public class BStar extends Module {
         .build()
     );
 
+    private final Setting<Boolean> autoEnableAutoLog = sgGeneral.add(new BoolSetting.Builder()
+        .name("auto-enable-autolog")
+        .description("Automatically enables AutoLog when BStar is activated.")
+        .defaultValue(false)
+        .build()
+    );
+
     // RTP Enum (same structure as AutoRTP)
     public enum RTPRegion {
         EU_CENTRAL("Eu Central", "eu central"),
@@ -484,6 +496,11 @@ public class BStar extends Module {
     private int moveAndRetryTicks = 0;
     private static final int MOVE_RETRY_DURATION = 20;
 
+
+
+
+
+
     // Stash detection
     private final Set<ChunkPos> processedChunks = new HashSet<>();
 
@@ -536,6 +553,7 @@ public class BStar extends Module {
             rtpWaitTicks = (RTP_COOLDOWN_SECONDS - remainingSeconds) * 20;
         }
     }
+
 
     @EventHandler
     private void onPacketReceive(PacketEvent.Receive event) {
@@ -1137,7 +1155,15 @@ public class BStar extends Module {
             toggle();
             return;
         }
-
+        if (autoEnableAutoLog.get()) {
+            AutoLog autoLog = Modules.get().get(AutoLog.class);
+            if (autoLog != null && !autoLog.isActive()) {
+                autoLog.toggle();
+                if (debugMode.get()) {
+                    info("AutoLog automatically enabled");
+                }
+            }
+        }
         // Initialize components
         try {
             pathScanner = new PathScanner();
@@ -1199,7 +1225,15 @@ public class BStar extends Module {
         if (mc.options != null) {
             stopMovement();
         }
-
+        if (autoEnableAutoLog.get()) {
+            AutoLog autoLog = Modules.get().get(AutoLog.class);
+            if (autoLog != null && autoLog.isActive()) {
+                autoLog.toggle();
+                if (debugMode.get()) {
+                    info("AutoLog automatically disabled");
+                }
+            }
+        }
         // Stop centering if active
         centeringHelper.stopCentering();
 
@@ -1236,7 +1270,6 @@ public class BStar extends Module {
             parkourHelper.reset();
         }
         processedChunks.clear();
-
         long runtime = (System.currentTimeMillis() - moduleStartTime) / 1000;
         info("Bstar deactivated. Runtime: " + runtime + "s, Blocks mined: " + totalBlocksMined);
     }
@@ -1426,13 +1459,41 @@ public class BStar extends Module {
             SafetyValidator.StuckRecoveryAction recoveryAction = safetyValidator.checkAndHandleStuck(mc.player, currentMode);
 
             switch (recoveryAction) {
-                case JUMPED:
-                    // First attempt - just jumped, let it settle
+                case JUMP_FORWARD:
+                    // Jump while moving forward
                     if (debugMode.get()) {
-                        info("Stuck detected - attempted jump recovery");
+                        info("Stuck detected - jumping while moving forward");
+                    }
+                    setPressed(mc.options.forwardKey, true);
+                    mc.player.jump();
+                    return;
+
+                case STOP_MOVEMENT:
+                    // Movement successful after jump, stop
+                    if (debugMode.get()) {
+                        info("Movement successful after jump - stopping");
                     }
                     stopMovement();
-                    return; // Skip this tick to let jump take effect
+                    return;
+
+                case PATH_BLOCKED_RTP:
+                    // Path completely blocked, initiate RTP
+                    if (rtpWhenStuck.get()) {
+                        if (debugMode.get()) {
+                            warning("Path completely blocked - initiating RTP recovery");
+                        }
+                        mc.getToastManager().add(new MeteorToast(
+                            Items.ENDER_PEARL,
+                            "Path Blocked",
+                            "Initiating RTP Recovery"
+                        ));
+                        rtpAttempts = 0;
+                        initiateRTP();
+                    } else {
+                        error("Path blocked and RTP is disabled - stopping");
+                        toggle();
+                    }
+                    return;
 
                 case RETOGGLE_KEYS:
                     // Mining down stuck - retoggle keys
@@ -2211,9 +2272,10 @@ public class BStar extends Module {
         int scanRadius = groundScanSize.get() / 2;
         boolean hasFluid = false;
         boolean hasVoid = false;
+        boolean hasWeb = false;
+        boolean hasVines = false;
 
         // Check for voids in the center area (directly below player)
-        // We check a smaller area for voids to be more precise
         int voidCheckRadius = Math.min(scanRadius, 1); // Check 1 block radius for voids
 
         for (int x = -voidCheckRadius; x <= voidCheckRadius; x++) {
@@ -2222,7 +2284,7 @@ public class BStar extends Module {
                 int solidDepth = 0;
                 boolean foundSolid = false;
 
-                for (int depth = 1; depth <= 15; depth++) { // Check up to 15 blocks deep
+                for (int depth = 1; depth <= 15; depth++) {
                     BlockPos belowPos = checkPos.add(x, -depth, z);
                     BlockState state = world.getBlockState(belowPos);
 
@@ -2247,12 +2309,13 @@ public class BStar extends Module {
             }
         }
 
-        // Check for fluids in wider area
+        // Check for fluids, cobwebs, and vines in wider area
         for (int depth = 1; depth <= 10; depth++) {
             for (int x = -scanRadius; x <= scanRadius; x++) {
                 for (int z = -scanRadius; z <= scanRadius; z++) {
                     BlockPos belowPos = checkPos.add(x, -depth, z);
                     BlockState state = world.getBlockState(belowPos);
+                    Block block = state.getBlock();
 
                     // Check for fluids
                     if (state.getFluidState().getFluid() == Fluids.LAVA ||
@@ -2266,14 +2329,39 @@ public class BStar extends Module {
                             System.out.println("Found " + fluidType + " at depth " + depth + ", offset X=" + x + " Z=" + z);
                         }
                     }
+
+                    // Check for cobwebs
+                    if (block == Blocks.COBWEB) {
+                        hasWeb = true;
+                        if (debugMode.get()) {
+                            System.out.println("Found cobweb at depth " + depth + ", offset X=" + x + " Z=" + z);
+                        }
+                    }
+
+                    // Check for vines
+                    if (block == Blocks.VINE ||
+                        block == Blocks.WEEPING_VINES ||
+                        block == Blocks.WEEPING_VINES_PLANT ||
+                        block == Blocks.TWISTING_VINES ||
+                        block == Blocks.TWISTING_VINES_PLANT ||
+                        block == Blocks.CAVE_VINES ||
+                        block == Blocks.CAVE_VINES_PLANT) {
+
+                        hasVines = true;
+                        if (debugMode.get()) {
+                            System.out.println("Found vines at depth " + depth + ", offset X=" + x + " Z=" + z);
+                        }
+                    }
                 }
             }
         }
 
-        if (hasFluid && hasVoid) {
-            return GroundHazard.BOTH;
-        } else if (hasFluid) {
-            return GroundHazard.FLUIDS;
+        // Prioritize hazards by danger level
+        if (hasFluid || hasWeb || hasVines) {
+            if (hasVoid) {
+                return GroundHazard.BOTH;
+            }
+            return GroundHazard.FLUIDS; // Using FLUIDS as general "hazardous blocks" category
         } else if (hasVoid) {
             return GroundHazard.VOID;
         }
@@ -2817,7 +2905,7 @@ public class BStar extends Module {
             case FALLING_BLOCK -> "Gravel/Sand";
             case UNSAFE_GROUND -> "Unsafe ground";
             case DANGEROUS_BLOCK -> "Dangerous block";
-            case SANDWICH_TRAP -> "Sandwich trap (blocked mining)";  // NEW
+            case SANDWICH_TRAP -> "Sandwich trap";
             default -> "Unknown hazard";
         };
     }
@@ -2864,6 +2952,24 @@ public class BStar extends Module {
         public int getTotal() {
             return chests + barrels + shulkers + enderChests + furnaces +
                 dispensersDroppers + hoppers + spawners;
+        }
+    }
+    public enum LogoPosition {
+        TOP_LEFT("Top Left"),
+        TOP_RIGHT("Top Right"),
+        BOTTOM_LEFT("Bottom Left"),
+        BOTTOM_RIGHT("Bottom Right"),
+        CENTER("Center");
+
+        private final String name;
+
+        LogoPosition(String name) {
+            this.name = name;
+        }
+
+        @Override
+        public String toString() {
+            return name;
         }
     }
 }
