@@ -395,6 +395,44 @@ public class BStar extends Module {
         .build()
     );
 
+    private final Setting<Integer> retoggleDelay = sgGeneral.add(new IntSetting.Builder()
+        .name("retoggle-delay")
+        .description("Delay in seconds before retoggling keys when stuck mining down.")
+        .defaultValue(3)
+        .range(0, 6)
+        .sliderRange(0, 6)
+        .visible(() -> true) // or true if you want it visible
+        .build()
+    );
+
+    private final Setting<Boolean> bypassMiningDown = sgRTP.add(new BoolSetting.Builder()
+        .name("bypass")
+        .description("Use interval clicking pattern when mining down to bypass anticheat.")
+        .defaultValue(false)
+        .visible(rtpWhenStuck::get)
+        .build()
+    );
+
+    private final Setting<Integer> intervalHoldDuration = sgRTP.add(new IntSetting.Builder()
+        .name("interval-hold-duration")
+        .description("How long to hold left click in milliseconds.")
+        .defaultValue(1000)
+        .range(200, 1500)
+        .sliderRange(200, 1500)
+        .visible(() -> rtpWhenStuck.get() && bypassMiningDown.get())
+        .build()
+    );
+
+    private final Setting<Integer> intervalPauseDuration = sgRTP.add(new IntSetting.Builder()
+        .name("interval-pause-duration")
+        .description("How long to pause between clicks in milliseconds.")
+        .defaultValue(460)
+        .range(400, 1500)
+        .sliderRange(400, 1500)
+        .visible(() -> rtpWhenStuck.get() && bypassMiningDown.get())
+        .build()
+    );
+
     // Add a public getter method so the mixin can access it
     public boolean isAlwaysFocused() {
         return isActive() && alwaysFocused.get();
@@ -496,8 +534,16 @@ public class BStar extends Module {
     private int moveAndRetryTicks = 0;
     private static final int MOVE_RETRY_DURATION = 20;
 
+    // Retoggle delay tracking
+    private boolean waitingToRetoggle = false;
+    private int retoggleDelayTicks = 0;
+    private static final int RETOGGLE_DELAY = 20; // 1 second delay
 
-
+    private boolean intervalMiningActive = false;
+    private long intervalStartTime = 0;
+    private boolean intervalHolding = false;
+    private int retoggleAttempts = 0;
+    private static final int MAX_RETOGGLE_ATTEMPTS = 1;
 
 
 
@@ -1244,7 +1290,11 @@ public class BStar extends Module {
         waitingAtTargetDepth = false;
         moveAndRetryTarget = null;
         moveAndRetryTicks = 0;
-
+        waitingToRetoggle = false;
+        retoggleDelayTicks = 0;
+        intervalMiningActive = false;
+        intervalHolding = false;
+        retoggleAttempts = 0;
         synchronized (hazardBlocks) {
             hazardBlocks.clear();
         }
@@ -1444,6 +1494,10 @@ public class BStar extends Module {
             return; // Skip everything else while throwing EXP
         }
 
+        if (waitingToRetoggle) {
+            handleRetoggleKeys();
+            return; // Skip everything else while waiting
+        }
         // Skip stuck detection during mining down or RTP states
         if (!isInRTPState() || currentState == MiningState.MOVING_TO_MINEDOWN) {
             // Determine current mining mode
@@ -1496,12 +1550,12 @@ public class BStar extends Module {
                     return;
 
                 case RETOGGLE_KEYS:
-                    // Mining down stuck - retoggle keys
-                    if (debugMode.get()) {
-                        info("Mining down stuck - retoggling keys");
+                    // Mining down stuck - retoggle keys with delay
+                    if (debugMode.get() && !waitingToRetoggle) {
+                        info("Mining down stuck - initiating key retoggle with delay");
                     }
                     handleRetoggleKeys();
-                    return;
+                    return; // Important: return here to prevent state machine from continuing
 
                 case MOVE_AND_RETRY:
                     // Mining down stuck - move horizontally then retry
@@ -1641,17 +1695,45 @@ public class BStar extends Module {
         }
     }
     private void handleRetoggleKeys() {
-        // Stop all keys
+        // Keep everything stopped during the entire retoggle process
         stopMovement();
         setPressed(mc.options.sneakKey, false);
         setPressed(mc.options.attackKey, false);
 
-        // Reset the mining down initiated flag to force retoggle
-        miningDownInitiated = false;
-        miningDownToggleTicks = 0;
+        // First time entering - start the delay
+        if (retoggleDelayTicks == 0) {
+            waitingToRetoggle = true;
 
-        if (debugMode.get()) {
-            info("Keys retoggled - resuming mining down");
+            if (debugMode.get()) {
+                info("Keys stopped - waiting " + retoggleDelay.get() + " second(s) before retoggling...");
+            }
+        }
+
+        // Increment delay counter
+        retoggleDelayTicks++;
+
+        // Show progress every 0.5 seconds in debug mode
+        if (debugMode.get() && retoggleDelayTicks % 10 == 0) {
+            float secondsRemaining = (retoggleDelay.get() * 20 - retoggleDelayTicks) / 20.0f;
+            System.out.println("Retoggle delay: " + String.format("%.1f", secondsRemaining) + " seconds remaining");
+        }
+
+        // Check if delay is complete
+        if (retoggleDelayTicks >= retoggleDelay.get() * 20) {
+            // Reset flags
+            miningDownInitiated = false;
+            miningDownToggleTicks = 0;
+            waitingToRetoggle = false;
+            retoggleDelayTicks = 0;
+            intervalMiningActive = false; // Reset interval mining state
+            intervalHolding = false;
+
+            if (debugMode.get()) {
+                info("Retoggle delay complete - mining down will resume");
+            }
+
+            // Don't change state here - let it continue with MINING_DOWN
+            // The mining down handler will reinitialize properly
         }
     }
     private void handleMoveAndRetry() {
@@ -2092,6 +2174,11 @@ public class BStar extends Module {
 
 
     private void handleMiningDown() {
+        // Early exit if we're waiting to retoggle keys
+        if (waitingToRetoggle) {
+            return; // Don't do anything while waiting for retoggle delay
+        }
+
         // Check if we've reached target depth
         if (mc.player.getY() <= mineDownTarget.get()) {
             // First time reaching target depth
@@ -2104,6 +2191,10 @@ public class BStar extends Module {
                 stopMovement();
                 setPressed(mc.options.sneakKey, false);
                 setPressed(mc.options.attackKey, false);
+
+                // Reset interval mining state
+                intervalMiningActive = false;
+                intervalHolding = false;
 
                 // Start waiting
                 waitingAtTargetDepth = true;
@@ -2143,6 +2234,9 @@ public class BStar extends Module {
                     miningDownInitiated = false;
                     safeMineDownTarget = null;
                     searchAttempts = 0;
+                    intervalMiningActive = false;
+                    intervalHolding = false;
+                    retoggleAttempts = 0;
 
                     currentState = MiningState.CENTERING;
 
@@ -2171,20 +2265,12 @@ public class BStar extends Module {
 
             miningDownInitiated = true;
             miningDownToggleTicks = 0;
+            intervalMiningActive = false;
+            intervalHolding = false;
             return;
         }
 
         miningDownToggleTicks++;
-
-        // Re-toggle keys periodically
-        if (miningDownToggleTicks % 20 == 0) {
-            setPressed(mc.options.attackKey, false);
-            setPressed(mc.options.sneakKey, false);
-
-            if (debugMode.get() && miningDownToggleTicks % 100 == 0) {
-                System.out.println("Refreshing mining keys (tick " + miningDownToggleTicks + ")");
-            }
-        }
 
         // Continue mining down with periodic safety checks
         mineDownScanTicks++;
@@ -2194,7 +2280,7 @@ public class BStar extends Module {
 
             // Use predictive scanning - check 5 blocks below current position
             BlockPos currentPos = mc.player.getBlockPos();
-            BlockPos predictedPos = currentPos.down(5); // Or use mineDownPredictionDistance.get() if you added that setting
+            BlockPos predictedPos = currentPos.down(5);
 
             if (debugMode.get()) {
                 System.out.println("Predictive scan from Y=" + predictedPos.getY() + " (5 blocks below current)");
@@ -2206,6 +2292,10 @@ public class BStar extends Module {
             if (hazard != GroundHazard.NONE) {
                 stopMovement();
                 setPressed(mc.options.sneakKey, false);
+
+                // Reset interval mining
+                intervalMiningActive = false;
+                intervalHolding = false;
 
                 String hazardType = "";
                 if (hazard == GroundHazard.FLUIDS) {
@@ -2227,24 +2317,134 @@ public class BStar extends Module {
             }
         }
 
-        // Always ensure keys are pressed for mining down
-        setPressed(mc.options.attackKey, true);
-        setPressed(mc.options.sneakKey, true);
-
-        // Check if we're stuck
+        // Enhanced stuck detection with retoggle limit
         if (miningDownToggleTicks > 40 && miningDownToggleTicks % 40 == 0) {
             Vec3d currentPos = mc.player.getPos();
             if (lastPos != null && Math.abs(currentPos.y - lastPos.y) < 0.5) {
-                if (debugMode.get()) {
-                    warning("Not moving down - retoggling mining keys");
+
+                // Check if we've already tried retoggling
+                if (retoggleAttempts >= MAX_RETOGGLE_ATTEMPTS) {
+                    if (debugMode.get()) {
+                        warning("Still stuck after retoggling - searching for alternate path");
+                    }
+
+                    // Reset retoggle attempts
+                    retoggleAttempts = 0;
+
+                    // Stop everything
+                    stopMovement();
+                    setPressed(mc.options.sneakKey, false);
+                    setPressed(mc.options.attackKey, false);
+                    intervalMiningActive = false;
+                    intervalHolding = false;
+
+                    // Try to find an alternate safe spot
+                    currentState = MiningState.SEARCHING_SAFE_MINEDOWN;
+                    searchAttempts++;
+
+                    // If we've searched too many times, just RTP
+                    if (searchAttempts >= MAX_SEARCH_ATTEMPTS) {
+                        if (rtpWhenStuck.get()) {
+                            if (debugMode.get()) {
+                                error("Cannot find any safe mining path after " + MAX_SEARCH_ATTEMPTS + " attempts - initiating RTP");
+                            }
+                            rtpAttempts = 0;
+                            searchAttempts = 0;
+                            initiateRTP();
+                        } else {
+                            error("Completely stuck and RTP is disabled");
+                            toggle();
+                        }
+                    }
+                    return;
                 }
 
+                // First retoggle attempt
+                if (debugMode.get()) {
+                    warning("Mining stuck - attempt " + (retoggleAttempts + 1) + "/" + MAX_RETOGGLE_ATTEMPTS);
+                }
+
+                // Stop everything
                 stopMovement();
                 setPressed(mc.options.sneakKey, false);
                 setPressed(mc.options.attackKey, false);
-                miningDownToggleTicks = 0;
+                intervalMiningActive = false;
+                intervalHolding = false;
+
+                // Increment retoggle attempts
+                retoggleAttempts++;
+
+                // Trigger the retoggle delay system
+                waitingToRetoggle = true;
+                retoggleDelayTicks = 0;
+
+                return; // Exit early to prevent continuing mining
+            } else {
+                // Movement successful, reset retoggle attempts
+                if (retoggleAttempts > 0) {
+                    retoggleAttempts = 0;
+                    if (debugMode.get()) {
+                        info("Movement resumed - resetting retoggle counter");
+                    }
+                }
             }
             lastPos = currentPos;
+        }
+
+        // Handle interval mining based on bypass setting
+        if (bypassMiningDown.get()) {
+            handleIntervalMining();
+        } else {
+            // Normal continuous mining
+            if (!waitingToRetoggle) {
+                setPressed(mc.options.attackKey, true);
+                setPressed(mc.options.sneakKey, true);
+            }
+        }
+    }
+
+    private void handleIntervalMining() {
+        // Always keep sneak pressed
+        setPressed(mc.options.sneakKey, true);
+
+        // Initialize interval mining if not active
+        if (!intervalMiningActive) {
+            intervalMiningActive = true;
+            intervalStartTime = System.currentTimeMillis();
+            intervalHolding = true;
+            setPressed(mc.options.attackKey, true);
+
+            if (debugMode.get()) {
+                info("Started interval mining pattern (bypass mode)");
+            }
+            return;
+        }
+
+        long currentTime = System.currentTimeMillis();
+        long elapsedTime = currentTime - intervalStartTime;
+
+        if (intervalHolding) {
+            // Currently holding, check if we should release
+            if (elapsedTime >= intervalHoldDuration.get()) {
+                setPressed(mc.options.attackKey, false);
+                intervalHolding = false;
+                intervalStartTime = currentTime;
+
+                if (debugMode.get()) {
+                    System.out.println("Interval: Released attack after " + intervalHoldDuration.get() + "ms");
+                }
+            }
+        } else {
+            // Currently paused, check if we should hold again
+            if (elapsedTime >= intervalPauseDuration.get()) {
+                setPressed(mc.options.attackKey, true);
+                intervalHolding = true;
+                intervalStartTime = currentTime;
+
+                if (debugMode.get()) {
+                    System.out.println("Interval: Holding attack for " + intervalHoldDuration.get() + "ms");
+                }
+            }
         }
     }
 
